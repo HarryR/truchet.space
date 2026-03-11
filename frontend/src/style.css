@@ -1,0 +1,390 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0a0a0a;
+  color: #e0e0e0;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* ── Menu bar ── */
+
+#menu {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 16px;
+  background: rgba(10, 10, 10, 0.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.menu-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #ccc;
+}
+
+.menu-wallet {
+  font-family: inherit;
+  font-size: 13px;
+  padding: 6px 14px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #181818;
+  color: #e0e0e0;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.menu-wallet:hover {
+  background: #222;
+  border-color: #555;
+}
+
+/* ── Wallet dialog ── */
+
+.wallet-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.wallet-overlay.open {
+  display: flex;
+  align-items: start;
+  justify-content: end;
+  padding: 56px 16px 0;
+}
+
+.wallet-dialog {
+  position: relative;
+  width: 300px;
+  background: #181818;
+  border: 1px solid #333;
+  border-radius: 10px;
+  padding: 36px 20px 20px;
+  color: #e0e0e0;
+  font-size: 14px;
+}
+
+.wallet-dialog-close {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 20px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px;
+}
+
+.wallet-dialog-close:hover {
+  color: #e0e0e0;
+}
+
+.wallet-dialog-addr {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: #fff;
+}
+
+.wallet-dialog-network {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: #111;
+  border-radius: 8px;
+  border: 1px solid #2a2a2a;
+  font-size: 13px;
+  color: #8c8;
+}
+
+.wallet-dialog-network.wrong-network {
+  color: #e88;
+  border-color: #442222;
+  background: #1a1111;
+}
+
+.wallet-dialog-switch-chain {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  background: #2a1515;
+  border: 1px solid #553333;
+  border-radius: 4px;
+  color: #e88;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.wallet-dialog-switch-chain:hover {
+  background: #3a1f1f;
+}
+
+.wallet-dialog-balances {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #111;
+  border-radius: 8px;
+  border: 1px solid #2a2a2a;
+}
+
+.wallet-dialog-balance {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.balance-label {
+  font-size: 12px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.balance-value {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 14px;
+  color: #e0e0e0;
+}
+
+.wallet-dialog-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wallet-dialog-providers:not(:last-child) {
+  margin-bottom: 16px;
+}
+
+.wallet-dialog-provider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  color: #e0e0e0;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.wallet-dialog-provider:hover {
+  background: #222;
+  border-color: #444;
+}
+
+.wallet-dialog-provider.active {
+  border-color: #666;
+  background: #252525;
+}
+
+.wallet-dialog-provider-icon {
+  border-radius: 4px;
+}
+
+.wallet-dialog-provider-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.wallet-dialog-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+  padding-left: 34px;
+}
+
+.wallet-dialog-account {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 12px;
+  padding: 5px 8px;
+  background: #151515;
+  border: 1px solid #222;
+  border-radius: 6px;
+  color: #999;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.wallet-dialog-account:hover {
+  background: #1e1e1e;
+  color: #e0e0e0;
+  border-color: #444;
+}
+
+.wallet-dialog-account.active {
+  color: #fff;
+  border-color: #555;
+  background: #1e1e1e;
+}
+
+.wallet-dialog-disconnect {
+  width: 100%;
+  padding: 8px;
+  background: #2a1515;
+  border: 1px solid #442222;
+  border-radius: 8px;
+  color: #e88;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.wallet-dialog-disconnect:hover {
+  background: #3a1f1f;
+}
+
+/* ── Tile info panel ── */
+
+.tile-panel {
+  position: absolute;
+  bottom: 32px;
+  left: 16px;
+  z-index: 15;
+  width: 260px;
+  background: #181818;
+  border: 1px solid #333;
+  border-radius: 10px;
+  padding: 32px 16px 16px;
+  color: #e0e0e0;
+  font-size: 13px;
+}
+
+.tile-panel-close {
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px;
+}
+
+.tile-panel-close:hover {
+  color: #e0e0e0;
+}
+
+.tile-panel-title {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 12px;
+}
+
+.tile-panel-field {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.tile-panel-label {
+  font-size: 12px;
+  color: #888;
+}
+
+.tile-panel-value {
+  font-size: 13px;
+  color: #e0e0e0;
+}
+
+.tile-panel-value.mono {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 12px;
+}
+
+.tile-panel-empty {
+  color: #666;
+  padding: 4px 0;
+}
+
+.tile-panel-chain {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #2a2a2a;
+}
+
+.tile-panel-loading,
+.tile-panel-error {
+  font-size: 12px;
+  color: #666;
+}
+
+.tile-panel-error {
+  color: #e88;
+}
+
+.tile-panel-explorer,
+.tile-panel-link {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #68a;
+  text-decoration: none;
+}
+
+.tile-panel-explorer:hover,
+.tile-panel-link:hover {
+  color: #8ac;
+  text-decoration: underline;
+}
+
+/* ── Grid canvas ── */
+
+#grid {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#ui {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 1rem;
+  pointer-events: none;
+}
+
+#ui > * {
+  pointer-events: auto;
+}
