@@ -65,6 +65,7 @@ contract TruchetNFT is IERC721Metadata {
     string public symbol;
     address public owner;
     address public gate;
+    bool public seeded;
     uint256 public totalSupply;
 
     // ERC-721 state
@@ -78,6 +79,11 @@ contract TruchetNFT is IERC721Metadata {
 
     // Family uniqueness: packed (ka, kb, kc, catalanIndex) → placed
     mapping(uint256 => bool) internal _familyCatalanUsed;
+
+    // Polarity bitmap: 4 bits per cell, 64 cells per uint256 word.
+    // Bits [3:0] = {req_c, req_b, req_a, occupied}
+    // req_x = polarity XOR (kx % 2) — the polarity this cell requires of neighbors on edge-pair x.
+    mapping(uint256 => uint256) internal _polarityBitmap;
 
     // ── Events ────────────────────────────────────────────────
 
@@ -107,6 +113,7 @@ contract TruchetNFT is IERC721Metadata {
     error EpSumDeltaTooLarge(uint16 q, uint16 r, uint16 ourSum, uint16 neighborSum);
     error PolarityConflict(uint16 q, uint16 r, uint8 edge);
     error PolarityDeadCell(uint16 q, uint16 r);
+    error AlreadySeeded();
     error NotGate();
 
     // ── Modifiers ─────────────────────────────────────────────
@@ -209,71 +216,100 @@ contract TruchetNFT is IERC721Metadata {
         return uint256(catalanIndex) | (uint256(kc) << 128) | (uint256(kb) << 136) | (uint256(ka) << 144);
     }
 
-    // ── Tile Placement ────────────────────────────────────────
+    // ── Polarity Bitmap ────────────────────────────────────────
 
-    /// @notice Place a tile at (q, r) and mint the NFT to `to`.
-    ///         Owner-only: used to seed the initial grid.
-    function seedTile(address to, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, bool polarity, uint128 catalanIndex)
-        external
-        onlyOwner
-    {
-        _seedTile(to, q, r, ka, kb, kc, polarity, catalanIndex);
+    /// @dev Read 4-bit entry from polarity bitmap.
+    function _bitmapRead(uint256 tokenId) internal view returns (uint256) {
+        return (_polarityBitmap[tokenId >> 6] >> ((tokenId & 63) << 2)) & 0xF;
     }
 
-    /// @notice Batch-seed multiple tiles in a single transaction.
-    ///         Owner-only. Skips neighbor validation — caller is trusted.
+    /// @dev Write 4-bit entry to polarity bitmap (read-modify-write).
+    function _bitmapWrite(uint256 tokenId, uint256 val4) internal {
+        uint256 wordKey = tokenId >> 6;
+        uint256 shift = (tokenId & 63) << 2;
+        _polarityBitmap[wordKey] =
+            (_polarityBitmap[wordKey] & ~(uint256(0xF) << shift)) | (val4 << shift);
+    }
+
+    /// @dev Compute 4-bit bitmap value: occupied bit + 3 reserved bits.
+    ///      The req_a/req_b/req_c bits are stored for potential future use but
+    ///      not currently read (lookahead removed).
+    function _computeBitmapVal(uint8 ka, uint8 kb, uint8 kc, bool polarity) internal pure returns (uint256) {
+        uint256 p = polarity ? 1 : 0;
+        return 1 | ((p ^ (uint256(ka) & 1)) << 1)
+                 | ((p ^ (uint256(kb) & 1)) << 2)
+                 | ((p ^ (uint256(kc) & 1)) << 3);
+    }
+
+    // ── Tile Placement ────────────────────────────────────────
+
+    /// @notice Seed a dense width×height block of tiles. One-shot — locks permanently.
+    ///         Owner-only. All data is pre-validated off-chain; no on-chain validation.
+    ///         Arrays are column-major: index = col * height + row.
+    ///         Polarities packed as bits in a uint256 (max 256 tiles).
     function seedTiles(
         address to,
-        uint16[] calldata qs,
-        uint16[] calldata rs,
+        uint16 q0,
+        uint16 r0,
+        uint8 width,
+        uint8 height,
         uint8[] calldata kas,
         uint8[] calldata kbs,
         uint8[] calldata kcs,
-        bool[] calldata polarities,
-        uint128[] calldata catalanIndexes
+        uint128[] calldata catalanIndexes,
+        uint256 polarities
     ) external onlyOwner {
-        uint256 n = qs.length;
-        for (uint256 i = 0; i < n; i++) {
-            _seedTile(to, qs[i], rs[i], kas[i], kbs[i], kcs[i], polarities[i], catalanIndexes[i]);
-        }
-    }
-
-    /// @dev Trusted seed: skips neighbor/polarity validation (owner-only callers).
-    ///      Only checks cell not occupied and family+catalan uniqueness.
-    function _seedTile(
-        address to,
-        uint16 q,
-        uint16 r,
-        uint8 ka,
-        uint8 kb,
-        uint8 kc,
-        bool polarity,
-        uint128 catalanIndex
-    ) internal {
+        if (seeded) revert AlreadySeeded();
         if (to == address(0)) revert ZeroAddress();
-        if (ka == 0 && kb == 0 && kc == 0) revert InvalidEpCount();
+        uint256 n = uint256(width) * uint256(height);
 
-        q &= MASK;
-        r &= MASK;
+        // Bitmap word cache — accumulate bits, flush on word-key change.
+        // Column-major iteration keeps consecutive r values together → max bitmap locality.
+        uint256 cachedWordKey = type(uint256).max;
+        uint256 cachedWord;
 
-        uint256 cell = _cellKey(q, r);
-        if (_grid[cell].ka != 0 || _grid[cell].kb != 0 || _grid[cell].kc != 0) {
-            revert CellOccupied(q, r);
+        for (uint256 col = 0; col < width; col++) {
+            uint16 q = (q0 + uint16(col)) & MASK;
+            for (uint256 row = 0; row < height; row++) {
+                uint256 i = col * uint256(height) + row;
+                uint8 ka = kas[i]; uint8 kb = kbs[i]; uint8 kc = kcs[i];
+                uint16 r = (r0 + uint16(row)) & MASK;
+                uint256 tokenId = (uint256(q) << 9) | uint256(r);
+
+                // Load / flush bitmap word cache
+                uint256 wordKey = tokenId >> 6;
+                if (wordKey != cachedWordKey) {
+                    if (cachedWordKey != type(uint256).max) {
+                        _polarityBitmap[cachedWordKey] = cachedWord;
+                    }
+                    cachedWord = _polarityBitmap[wordKey];
+                    cachedWordKey = wordKey;
+                }
+
+                // Accumulate bitmap bits in memory
+                bool pol = (polarities >> i) & 1 == 1;
+                uint256 shift = (tokenId & 63) << 2;
+                cachedWord = (cachedWord & ~(uint256(0xF) << shift))
+                           | (_computeBitmapVal(ka, kb, kc, pol) << shift);
+
+                uint128 idx = catalanIndexes[i];
+                _familyCatalanUsed[_familyKey(ka, kb, kc, idx)] = true;
+                _grid[_cellKey(q, r)] = Tile(ka, kb, kc, pol, idx);
+                _owners[tokenId] = to;
+
+                emit Transfer(address(0), to, tokenId);
+                emit TilePlaced(q, r, to, ka, kb, kc, pol, idx);
+            }
         }
 
-        uint256 fKey = _familyKey(ka, kb, kc, catalanIndex);
-        if (_familyCatalanUsed[fKey]) revert CatalanIndexUsed(ka, kb, kc, catalanIndex);
-        _familyCatalanUsed[fKey] = true;
+        // Flush last cached bitmap word
+        if (cachedWordKey != type(uint256).max) {
+            _polarityBitmap[cachedWordKey] = cachedWord;
+        }
 
-        uint256 tokenId = tokenIdOf(q, r);
-
-        _grid[cell] = Tile(ka, kb, kc, polarity, catalanIndex);
-        _balances[to]++;
-        _owners[tokenId] = to;
-        totalSupply++;
-
-        emit Transfer(address(0), to, tokenId);
-        emit TilePlaced(q, r, to, ka, kb, kc, polarity, catalanIndex);
+        _balances[to] += n;
+        totalSupply += n;
+        seeded = true;
     }
 
     /// @notice Place a tile at (q, r) and mint the NFT to `to`.
@@ -290,15 +326,23 @@ contract TruchetNFT is IERC721Metadata {
         internal view returns (bool hasNeighbor, bool polarity)
     {
         uint8[3] memory eps = [ka, kb, kc];
-        uint16 ourSum = uint16(ka) + uint16(kb) + uint16(kc);
         bool polaritySet = false;
 
+        // Track which axes (0=ka, 1=kb, 2=kc) are constrained by a neighbor.
+        // Constrained axes are forced by edge matching — only free axes contribute
+        // to the EP sum delta check.
+        bool[3] memory axisConstrained;
+
+        // First pass: edge matching + polarity, record constrained axes
         for (uint8 edge = 0; edge < 6; edge++) {
             (uint16 nq, uint16 nr) = _neighbor(q, r, edge);
-            Tile memory nb = _grid[_cellKey(nq, nr)];
-            if (nb.ka == 0 && nb.kb == 0 && nb.kc == 0) continue;
+            uint256 nKey = _cellKey(nq, nr);
+
+            if (_bitmapRead(nKey) & 1 == 0) continue;
 
             hasNeighbor = true;
+
+            Tile memory nb = _grid[nKey];
 
             uint8 neighborEp = _edgeEpCount(nb, (edge + 3) % 6);
             uint8 ourEp = eps[edge % 3];
@@ -306,15 +350,36 @@ contract TruchetNFT is IERC721Metadata {
                 revert EdgeMismatch(q, r, edge, neighborEp, ourEp);
             }
 
-            // EP half-sum can change by at most ±2 per step
-            uint16 nbSum = uint16(nb.ka) + uint16(nb.kb) + uint16(nb.kc);
-            uint16 diff = ourSum > nbSum ? ourSum - nbSum : nbSum - ourSum;
-            if (diff > 2) {
-                revert EpSumDeltaTooLarge(q, r, ourSum, nbSum);
-            }
+            axisConstrained[edge % 3] = true;
 
-            // Derive polarity from neighbor
-            bool requiredPol = (ourEp % 2 == 0) ? nb.polarity : !nb.polarity;
+            // Derive polarity from neighbor via arc color matching.
+            //
+            // For two hex tiles sharing edge E (tile A) / edge E'=(E+3)%6 (tile B),
+            // the color at each shared corner must agree. Corner between edges i-1
+            // and i has nesting depth ≡ ∑EPs(0..i-1) (mod 2), which is matching-
+            // independent for non-crossing matchings. Equating colors gives:
+            //
+            //   flipFactor(E) = ∑EPs_A(0..E-1) + ∑EPs_B(0..E') (mod 2)
+            //
+            // Expanded per edge (A = new tile, B = neighbor):
+            //   E=0: nb.kb + nb.kc      E=3: ka + kb + kc + nb.ka
+            //   E=1: ka + nb.kc         E=4: kb + kc + nb.ka + nb.kb
+            //   E=2: ka + kb            E=5: kc + nb.ka + nb.kb + nb.kc
+            uint256 flipFactor;
+            if (edge == 0) {
+                flipFactor = (uint256(nb.kb) + uint256(nb.kc)) & 1;
+            } else if (edge == 1) {
+                flipFactor = (uint256(ka) + uint256(nb.kc)) & 1;
+            } else if (edge == 2) {
+                flipFactor = (uint256(ka) + uint256(kb)) & 1;
+            } else if (edge == 3) {
+                flipFactor = (uint256(ka) + uint256(kb) + uint256(kc) + uint256(nb.ka)) & 1;
+            } else if (edge == 4) {
+                flipFactor = (uint256(kb) + uint256(kc) + uint256(nb.ka) + uint256(nb.kb)) & 1;
+            } else {
+                flipFactor = (uint256(kc) + uint256(nb.ka) + uint256(nb.kb) + uint256(nb.kc)) & 1;
+            }
+            bool requiredPol = (flipFactor == 0) ? nb.polarity : !nb.polarity;
             if (!polaritySet) {
                 polarity = requiredPol;
                 polaritySet = true;
@@ -323,52 +388,39 @@ contract TruchetNFT is IERC721Metadata {
             }
         }
 
+        // Second pass: EP sum delta check — only the free (unconstrained) portion
+        // of our sum is checked against each neighbor's free portion.
+        // This allows forced edge-matched tiles to always be placeable, while
+        // still limiting how fast the user can grow EPs on free edges.
+        if (hasNeighbor) {
+            uint16 ourFreeSum;
+            for (uint8 i = 0; i < 3; i++) {
+                if (!axisConstrained[i]) ourFreeSum += eps[i];
+            }
+            for (uint8 edge = 0; edge < 6; edge++) {
+                (uint16 nq, uint16 nr) = _neighbor(q, r, edge);
+                uint256 nKey = _cellKey(nq, nr);
+                if (_bitmapRead(nKey) & 1 == 0) continue;
+
+                Tile memory nb = _grid[nKey];
+                uint16 nbFreeSum;
+                uint8[3] memory nbEps = [nb.ka, nb.kb, nb.kc];
+                for (uint8 i = 0; i < 3; i++) {
+                    if (!axisConstrained[i]) nbFreeSum += nbEps[i];
+                }
+
+                uint16 diff = ourFreeSum > nbFreeSum ? ourFreeSum - nbFreeSum : nbFreeSum - ourFreeSum;
+                if (diff > 2) {
+                    revert EpSumDeltaTooLarge(q, r, ourFreeSum, nbFreeSum);
+                }
+            }
+        }
+
         // Default polarity for seed tile (no neighbors)
         if (!polaritySet) {
             polarity = true;
         }
 
-        // Lookahead: check that each empty neighbor won't become unplaceable
-        _checkLookahead(q, r, eps, polarity);
-    }
-
-    /// @dev For each empty neighbor E of (q,r), verify that all of E's placed
-    ///      neighbors (including the tile about to be placed at (q,r)) agree
-    ///      on E's required polarity.
-    function _checkLookahead(uint16 q, uint16 r, uint8[3] memory eps, bool tilePol) internal view {
-        for (uint8 edge = 0; edge < 6; edge++) {
-            (uint16 eq, uint16 er) = _neighbor(q, r, edge);
-            // Skip if E is already occupied
-            {
-                Tile memory existing = _grid[_cellKey(eq, er)];
-                if (existing.ka != 0 || existing.kb != 0 || existing.kc != 0) continue;
-            }
-
-            // E is empty — compute what polarity it would need
-            // Constraint from the tile we're about to place
-            uint8 sharedEpFromUs = eps[edge % 3];
-            bool ePol = (sharedEpFromUs % 2 == 0) ? tilePol : !tilePol;
-            bool ePolSet = true;
-
-            // Check all 6 neighbors of E
-            for (uint8 eEdge = 0; eEdge < 6; eEdge++) {
-                (uint16 enq, uint16 enr) = _neighbor(eq, er, eEdge);
-                // Skip if this neighbor is the tile being placed (already handled)
-                if (enq == q && enr == r) continue;
-
-                Tile memory enb = _grid[_cellKey(enq, enr)];
-                if (enb.ka == 0 && enb.kb == 0 && enb.kc == 0) continue;
-
-                uint8 sharedEp = _edgeEpCount(enb, (eEdge + 3) % 6);
-                bool need = (sharedEp % 2 == 0) ? enb.polarity : !enb.polarity;
-
-                if (ePolSet && ePol != need) {
-                    revert PolarityDeadCell(eq, er);
-                }
-                ePol = need;
-                ePolSet = true;
-            }
-        }
     }
 
     function _placeTile(
@@ -388,10 +440,9 @@ contract TruchetNFT is IERC721Metadata {
         q &= MASK;
         r &= MASK;
 
-        uint256 cell = _cellKey(q, r);
-        if (_grid[cell].ka != 0 || _grid[cell].kb != 0 || _grid[cell].kc != 0) {
-            revert CellOccupied(q, r);
-        }
+        // Token ID = packed (q, r)
+        uint256 tokenId = tokenIdOf(q, r);
+        if (_bitmapRead(tokenId) & 1 != 0) revert CellOccupied(q, r);
 
         (bool hasNeighbor, bool polarity) = _checkNeighbors(q, r, ka, kb, kc);
         if (requireAdjacent && !hasNeighbor) {
@@ -403,10 +454,8 @@ contract TruchetNFT is IERC721Metadata {
         if (_familyCatalanUsed[fKey]) revert CatalanIndexUsed(ka, kb, kc, catalanIndex);
         _familyCatalanUsed[fKey] = true;
 
-        // Token ID = packed (q, r)
-        uint256 tokenId = tokenIdOf(q, r);
-
-        _grid[cell] = Tile(ka, kb, kc, polarity, catalanIndex);
+        _grid[_cellKey(q, r)] = Tile(ka, kb, kc, polarity, catalanIndex);
+        _bitmapWrite(tokenId, _computeBitmapVal(ka, kb, kc, polarity));
         _balances[to]++;
         _owners[tokenId] = to;
         totalSupply++;
@@ -415,7 +464,39 @@ contract TruchetNFT is IERC721Metadata {
         emit TilePlaced(q, r, to, ka, kb, kc, polarity, catalanIndex);
     }
 
+    // ── Occupancy Bitmap Read ──────────────────────────────────
+
+    /// @notice Batch-read occupancy bitmap (1 bit per cell, 256 cells per word).
+    /// @param packed  Bits [7:0] = count N (max 24).
+    ///                For i in 0..N-1: bits [8+10*i .. 17+10*i] = repacked word index (0–1023).
+    ///                Each repacked word covers 256 cells (4 source bitmap words, bit 0 extracted).
+    /// @return words  The N repacked occupancy words.
+    function readOccupancy(uint256 packed) external view returns (uint256[] memory words) {
+        uint256 n = packed & 0xFF;
+        if (n > 24) n = 24;
+        words = new uint256[](n);
+        for (uint256 i; i < n; i++) {
+            uint256 idx = (packed >> (8 + 10 * i)) & 0x3FF;
+            uint256 base = idx << 2;
+            uint256 packed256;
+            for (uint256 w; w < 4; w++) {
+                uint256 src = _polarityBitmap[base + w];
+                uint256 bits64;
+                for (uint256 c; c < 64; c++) {
+                    bits64 |= ((src >> (c << 2)) & 1) << c;
+                }
+                packed256 |= bits64 << (w << 6);
+            }
+            words[i] = packed256;
+        }
+    }
+
     // ── Grid Queries ──────────────────────────────────────────
+
+    /// @notice Check whether a (family, catalanIndex) pair has been placed.
+    function isCatalanUsed(uint8 ka, uint8 kb, uint8 kc, uint128 catalanIndex) public view returns (bool) {
+        return _familyCatalanUsed[_familyKey(ka, kb, kc, catalanIndex)];
+    }
 
     /// @notice Returns tile data and owner at grid position (q, r).
     function getTile(uint16 q, uint16 r)

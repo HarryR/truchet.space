@@ -41,7 +41,7 @@ export const GATE_ADDRESS: string =
 export const BLOCK_EXPLORER: string =
   (import.meta.env.VITE_BLOCK_EXPLORER as string) ?? 'https://etherscan.io'
 
-// ── API ──
+// ── CDN (static tile files) ──
 
-export const TILE_API: string =
-  (import.meta.env.VITE_TILE_API as string) ?? 'http://localhost:8100'
+export const TILE_CDN: string =
+  (import.meta.env.VITE_TILE_CDN as string) ?? 'http://localhost:8100'

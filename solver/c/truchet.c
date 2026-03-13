@@ -594,7 +594,7 @@ static void emit_region_path(FILE *f, int a, int b,
 static void emit_json(FILE *f, const TileDesc *descs, const SolvedTile *solved,
                       int n_tiles, int rows, int cols, const char *shape_name,
                       const int *edge_eps_config, int n_edge_vals,
-                      int total_eps, int n_levels);
+                      int total_eps, int n_levels, const char *minter);
 
 static void emit_svg(FILE *f, const TileDesc *descs, const SolvedTile *solved,
                      int n_tiles, double tile_scale, double margin,
@@ -602,7 +602,7 @@ static void emit_svg(FILE *f, const TileDesc *descs, const SolvedTile *solved,
                      bool show_curves, bool show_outlines,
                      int rows, int cols, const char *shape_name,
                      const int *edge_eps_config, int n_edge_vals,
-                     int total_eps, int n_levels)
+                     int total_eps, int n_levels, const char *minter)
 {
     /* Compute bounds */
     double min_x = 1e30, min_y = 1e30, max_x = -1e30, max_y = -1e30;
@@ -634,7 +634,7 @@ static void emit_svg(FILE *f, const TileDesc *descs, const SolvedTile *solved,
     /* Embedded metadata for tile recovery */
     fprintf(f, "<metadata>\n");
     emit_json(f, descs, solved, n_tiles, rows, cols, shape_name,
-              edge_eps_config, n_edge_vals, total_eps, n_levels);
+              edge_eps_config, n_edge_vals, total_eps, n_levels, minter);
     fprintf(f, "</metadata>\n");
 
     /* Background pass: merge same-color tile polygons */
@@ -746,9 +746,11 @@ static void emit_svg(FILE *f, const TileDesc *descs, const SolvedTile *solved,
 static void emit_json(FILE *f, const TileDesc *descs, const SolvedTile *solved,
                       int n_tiles, int rows, int cols, const char *shape_name,
                       const int *edge_eps_config, int n_edge_vals,
-                      int total_eps, int n_levels)
+                      int total_eps, int n_levels, const char *minter)
 {
-    fprintf(f, "{\n  \"config\": {\n");
+    fprintf(f, "{\n");
+    if (minter) fprintf(f, "  \"minter\": \"%s\",\n", minter);
+    fprintf(f, "  \"config\": {\n");
     fprintf(f, "    \"shape\": \"%s\",\n", shape_name);
     fprintf(f, "    \"w\": %d, \"h\": %d,\n", cols, rows);
     fprintf(f, "    \"eps\": [");
@@ -765,7 +767,7 @@ static void emit_json(FILE *f, const TileDesc *descs, const SolvedTile *solved,
         const SolvedTile *st = &solved[i];
         char rank_str[40];
         uint128_to_str(rank_str, st->matching_rank);
-        fprintf(f, "    [\"%s\"", rank_str);
+        fprintf(f, "    [\"%s\", %d", rank_str, descs[i].polarity ? 1 : 0);
         for (int j = 0; j < st->n_arcs; j++) {
             fprintf(f, ", [%d, %d]", st->d0_idx[j], st->d1_idx[j]);
         }
@@ -866,7 +868,7 @@ int main(int argc, char **argv)
     const char *val_w = NULL, *val_h = NULL, *val_shape = NULL;
     const char *val_seed = NULL, *val_ep = NULL, *val_eps = NULL;
     const char *val_svg = NULL, *val_json = NULL, *val_idx = NULL;
-    const char *val_pos = NULL, *val_polarity = NULL;
+    const char *val_pos = NULL, *val_polarity = NULL, *val_minter = NULL;
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -912,6 +914,7 @@ int main(int argc, char **argv)
         else if (strcmp(key, "idx") == 0)   val_idx = val;
         else if (strcmp(key, "pos") == 0)   val_pos = val;
         else if (strcmp(key, "polarity") == 0) val_polarity = val;
+        else if (strcmp(key, "minter") == 0) val_minter = val;
         else {
             fprintf(stderr, "Unknown key: %s\n", key);
             print_usage();
@@ -1228,7 +1231,7 @@ int main(int argc, char **argv)
         emit_svg(fout, descs, solved, n_tiles, 80.0, 4.0,
                  "#2c3e50", "#ecf0f1", show_curves, show_outlines,
                  rows, cols, shape_name, edge_eps_config, n_edge_vals,
-                 total_eps, out_n_levels);
+                 total_eps, out_n_levels, val_minter);
         if (fout != stdout) {
             fclose(fout);
             if (!g_quiet) fprintf(stderr, "  wrote %s\n", val_svg);
@@ -1238,7 +1241,7 @@ int main(int argc, char **argv)
         FILE *fout = strcmp(val_json, "-") == 0 ? stdout : fopen(val_json, "w");
         if (!fout) { fprintf(stderr, "Cannot open %s\n", val_json); return 1; }
         emit_json(fout, descs, solved, n_tiles, rows, cols, shape_name,
-                  edge_eps_config, n_edge_vals, total_eps, out_n_levels);
+                  edge_eps_config, n_edge_vals, total_eps, out_n_levels, val_minter);
         if (fout != stdout) {
             fclose(fout);
             if (!g_quiet) fprintf(stderr, "  wrote %s\n", val_json);

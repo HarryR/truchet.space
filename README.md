@@ -4,13 +4,13 @@ Generative Collaborative Math & Art Exploration
 
 ## Overview
 
-Truchet.space is a collaborative generative art project built on a hexagonal grid. Participants place Truchet tiles — hexagons filled with non-crossing Bézier curves — onto a shared infinite grid. Each placed tile is minted as an NFT. The curves within each tile are solved off-chain to avoid collisions, and the resulting artwork emerges from the collective decisions of all participants.
+Truchet.space is a collaborative generative art project built on a hexagonal grid. Participants place Truchet tiles — hexagons filled with non-crossing Bézier curves — onto a shared toroidal grid. Each placed tile is minted as an NFT. The curves within each tile are solved off-chain to avoid collisions, and the resulting artwork emerges from the collective decisions of all participants.
 
 ## How It Works
 
 ### Hexagonal Grid
 
-The world is an infinite hexagonal grid (even-q offset layout). Each hex cell can hold one tile. Tiles can only be placed adjacent to an existing tile — they must share at least one face with an already-placed hex.
+The world is a 512×512 hexagonal grid (even-q offset layout) with toroidal topology — edges wrap around. Each hex cell can hold one tile. Tiles can only be placed adjacent to an existing tile — they must share at least one face with an already-placed hex. Maximum 262,144 tiles.
 
 The grid is seeded with initial tiles placed by the project owner. From there, participants expand the grid outward by placing tiles in the available frontier cells.
 
@@ -28,13 +28,17 @@ Within each family, tiles are distinguished by their **Catalan index** — an in
 - The user supplies their desired Catalan index when minting
 - The index must be valid (less than `Catalan(total_eps/2)`)
 
+### Polarity
+
+Each tile has a **polarity** (+ or -) derived from its neighbors. The polarity of a tile is determined by the EP count on the shared edge with its neighbor: even EP → same polarity, odd EP → opposite polarity. The contract enforces polarity consistency and runs a lookahead check to prevent "dead cells" — empty cells that would become unplaceable due to conflicting polarity requirements from their neighbors.
+
 ### Placing a Tile (Minting)
 
 1. User picks an empty hex cell adjacent to at least one existing tile
 2. Contract determines which edges are constrained by neighbors
 3. User specifies EP counts for the free edges (must satisfy the mirroring rule)
 4. User specifies a Catalan index (must be unique within the resulting family)
-5. Contract validates all constraints and mints the NFT
+5. Contract validates all constraints, derives polarity, and mints the NFT
 
 ### Curve Solving (Off-chain)
 
@@ -47,28 +51,29 @@ See `solver/bitmap-collision-solver.md` for solver internals and `solver/TILE_RE
 ```
 ├── contracts/           Forge/Solidity project
 │   ├── src/
-│   │   ├── TruchetNFT.sol   ERC-721 + hex grid registry
+│   │   ├── TruchetNFT.sol   ERC-721 + hex grid registry (512×512 torus)
 │   │   └── TruchetGate.sol  Payment gate (ETH + USDC)
-│   ├── test/            Solidity tests (47 tests)
+│   ├── test/            Solidity tests (54 tests)
 │   ├── script/          Deployment scripts
 │   └── Makefile         Build, test, deploy (local Foundry install)
 │
 ├── frontend/            TypeScript + Canvas browser UI (Vite)
 │   └── src/
-│       ├── main.ts      Canvas rendering, camera, interaction
+│       ├── main.ts      Canvas rendering, camera, tile info panel
 │       ├── grid.ts      Tile index + lazy SVG loading (LRU cache)
-│       ├── hex.ts       Even-q hex grid math
+│       ├── hex.ts       Even-q hex grid math (toroidal 512×512)
 │       ├── wallet.ts    EIP-1193/EIP-6963 wallet integration
-│       ├── contracts.ts ABI encoding + placeTile transaction
+│       ├── contracts.ts ABI encoding + on-chain queries (cache-busting)
 │       ├── abi.ts       Minimal ABI encode/decode (no dependencies)
 │       ├── menu.ts      Wallet dialog + multi-provider selector
+│       ├── eip6963.ts   EIP-6963 provider discovery
 │       └── config.ts    Environment configuration
 │
 ├── backend/             Python tile server + generation
 │   ├── server.py        HTTP server (/grid, /tile endpoints) + event polling
 │   ├── solver.py        Shared solve function (dev + prod)
-│   ├── seed.py          Generate tile clusters (offline)
-│   ├── seed_anvil.py    Seed tiles on Anvil via cast
+│   ├── seed.py          Generate tile clusters (toroidal)
+│   ├── seed_anvil.py    Batch seed tiles on Anvil via cast
 │   └── solve_tile.py    Single-tile solver CLI
 │
 ├── solver/              Tile curve solver
@@ -92,22 +97,40 @@ The NFT contract (`TruchetNFT.sol`) is the authoritative registry for the hex gr
 - **EP constraints**: shared edges must have matching EP counts
 - **Mirroring**: hex edge pattern `[ka, kb, kc, ka, kb, kc]` is preserved
 - **Uniqueness**: no two tiles in the same family share a Catalan index
-- **Polarity**: derived from neighbors, prevents dead cells via lookahead
+- **Polarity**: derived from neighbors, stored on-chain, prevents dead cells via lookahead
+- **Torus topology**: 512×512 grid, coordinates wrap mod 512
 - **Ownership**: each tile is an ERC-721 token owned by its placer
 
-The `TruchetGate.sol` contract handles payments (ETH or USDC via ERC-3009) and calls `placeTile` on the NFT contract.
+Token ID = packed 9-bit grid coordinate: `(uint256(q) << 9) | uint256(r)`.
 
-On every tile placement, a `TilePlaced` event is emitted with all solver-relevant data (q, r, ka, kb, kc, polarity, catalanIndex) — no follow-up `getTile` call needed.
+The `TruchetGate.sol` contract handles payments (ETH or USDC via ERC-3009) and calls `placeTile` on the NFT contract. `placeTileETH` costs ~191k gas.
+
+On every tile placement, a `TilePlaced` event is emitted with all solver-relevant data (q, r, owner, ka, kb, kc, polarity, catalanIndex) — no follow-up `getTile` call needed.
+
+Owner-only `seedTile` and `seedTiles` (batch) functions skip neighbor validation for trusted initial grid seeding with caller-specified polarity.
 
 ### Building
 
 ```sh
 cd contracts
-make test      # downloads Foundry locally, runs tests
+make test      # downloads Foundry locally, runs 54 tests
 make build     # compile only
 ```
 
 No global Foundry install required. The Makefile downloads a pinned version into `contracts/bin/`.
+
+## Frontend
+
+The frontend is a zero-dependency TypeScript application (no React, no ethers.js, no viem). ABI encoding uses precomputed 4-byte function selectors — no runtime keccak needed.
+
+Features:
+- Canvas-based hex grid renderer with pan/zoom
+- Toroidal display — grid wraps seamlessly as you pan
+- Tile info panel on click — shows family, polarity, owner (on-chain), explorer link
+- `#tile=q,r` deep linking (used as `external_url` in NFT metadata)
+- EIP-6963 wallet discovery with multi-provider/multi-account support
+- Cache-busting for all `eth_call` / `eth_getBalance` (MetaMask caches aggressively)
+- `wallet_addEthereumChain` fallback for unknown networks
 
 ## Local Development
 
@@ -125,7 +148,7 @@ This:
 4. Deploys TruchetNFT + TruchetGate
 5. Extracts contract addresses to `.env` files
 6. Starts the backend server (`:8100`) with event polling
-7. Seeds ~20 tiles on Anvil (backend picks up events and generates SVGs)
+7. Batch-seeds ~20 tiles on Anvil (backend picks up events and generates SVGs)
 8. Starts the Vite frontend (`:5173`)
 
 The backend polls Anvil for `TilePlaced` events every 2 seconds, runs the solver, and writes SVGs to disk. The frontend fetches the grid and tile SVGs from the backend.

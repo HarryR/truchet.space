@@ -15,8 +15,12 @@
 
 export const SEL_BALANCE_OF = '0x70a08231'
 export const SEL_PRICE_ETH = '0xc38ad273'
+export const SEL_PRICE_USDC = '0x998ef386'
 export const SEL_PLACE_TILE_ETH = '0xb289fc6e'
+export const SEL_PLACE_TILE_USDC = '0xc222c110'
 export const SEL_GET_TILE = '0x25181bd2'
+export const SEL_IS_CATALAN_USED = '0x704a9bfe'
+export const SEL_READ_OCCUPANCY = '0xfcb69665'
 
 // ── Encoding helpers ──
 

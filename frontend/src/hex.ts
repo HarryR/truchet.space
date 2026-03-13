@@ -15,7 +15,7 @@
  */
 
 export const GRID_SIZE = 512
-const MASK = 511
+export const MASK = 511
 
 /** Grid coordinate. */
 export interface Hex {
@@ -148,18 +148,6 @@ export function facingEdge(edge: number): number {
   return (edge + 3) % 6
 }
 
-/** Pack (q, r) into a tokenId-style key: (q << 9) | r (matches on-chain). */
-export function cellKey(q: number, r: number): bigint {
-  return (BigInt(q & MASK) << 9n) | BigInt(r & MASK)
-}
-
-/** Unpack a cell key back to (q, r). */
-export function fromCellKey(key: bigint): Hex {
-  return {
-    q: Number((key >> 9n) & BigInt(MASK)),
-    r: Number(key & BigInt(MASK)),
-  }
-}
 
 /** Edge index to EP parameter: edges 0,3 → ka; edges 1,4 → kb; edges 2,5 → kc. */
 export function edgeParam(edge: number): 'ka' | 'kb' | 'kc' {

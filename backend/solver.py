@@ -19,6 +19,7 @@ Metadata = dict[str, Any]
 
 def solve_tile(q: int, r: int, ka: int, kb: int, kc: int,
                idx: int, polarity: int,
+               minter: str = "",
                solver_bin: str = DEFAULT_SOLVER_BIN) -> tuple[str, Metadata]:
     """Run solver, return (svg_string, metadata_dict).
 
@@ -34,6 +35,8 @@ def solve_tile(q: int, r: int, ka: int, kb: int, kc: int,
         "svg=-",
         "-q",
     ]
+    if minter:
+        cmd.append(f"minter={minter}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
@@ -49,7 +52,7 @@ def solve_tile(q: int, r: int, ka: int, kb: int, kc: int,
             f"A hexagonal Truchet tile at grid position ({q}, {r}) "
             f"with family ({ka}, {kb}, {kc}) and Catalan index {idx}."
         ),
-        "image": f"https://tiles.truchet.space/{q}-{r}.svg",
+        "image": f"https://tiles.truchet.space/{q}/{r}.svg",
         "external_url": f"https://truchet.space/#tile={q},{r}",
         "attributes": [
             {"trait_type": "Column (q)", "display_type": "number", "value": q},

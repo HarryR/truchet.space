@@ -1,12 +1,16 @@
 import './style.css'
-import { createLayout, hexToPixel, hexPath, hexPathInset, pixelToHex, GRID_SIZE } from './hex'
-import { loadGrid, getTile, ensureSvgLoaded, setOnUpdate } from './grid'
+import { createLayout, hexToPixel, hexPath, hexPathInset, pixelToHex, GRID_SIZE, MASK, neighbor } from './hex'
+import { getTile, fetchMetadata, ensureSvgLoaded, setOnUpdate, isPlaced, awaitTilePlacement, refreshBitmap, refreshFrontier, queueConstraintAnalysis } from './grid'
 import { initMenu } from './menu'
-import { fetchTile, tokenIdOf, type OnChainTile } from './contracts'
-import { isConnected } from './wallet'
+import {
+  fetchTile, fetchPriceETH, fetchPriceUSDC, tokenIdOf,
+  placeTileETH, placeTileUSDC, waitForReceipt,
+} from './contracts'
+import { isConnected, isCorrectChain, getEthBalance, getUsdcBalance } from './wallet'
 import { NFT_ADDRESS, BLOCK_EXPLORER } from './config'
-
-const MASK = GRID_SIZE - 1
+import { formatEther, formatUnits } from './abi'
+import { computeConstraints, pickCatalanIndex, catalan, nextValidValue, type TileConstraints } from './tileParams'
+import { signUsdcAuthorization } from './usdc'
 
 const canvas = document.getElementById('grid') as HTMLCanvasElement
 const ctx = canvas.getContext('2d')!
@@ -45,6 +49,7 @@ function resize() {
   // Clamp zoom after resize (screen got bigger → minZoom may have changed)
   camera.zoom = Math.max(camera.zoom, minZoom())
   draw()
+  scheduleViewportRefresh()
 }
 
 // ── Draw ──
@@ -82,21 +87,18 @@ function draw() {
     for (let r = rMin; r <= rMax; r++) {
       const wr = ((r % GRID_SIZE) + GRID_SIZE) & MASK
       const [cx, cy] = hexToPixel(layout, q, r)
-      const tile = getTile(wq, wr)
+      const img = ensureSvgLoaded(wq, wr)
 
-      if (tile) {
-        const img = ensureSvgLoaded(wq, wr)
-        if (img) {
-          ctx.save()
-          hexPathInset(ctx, layout, cx, cy, -0.5)
-          ctx.clip()
-          const svgPad = 4
-          const over = 1
-          const drawW = layout.width + svgPad * 2 + over * 2
-          const drawH = layout.height + svgPad * 2 + over * 2
-          ctx.drawImage(img, cx - layout.size - svgPad - over, cy - layout.height / 2 - svgPad - over, drawW, drawH)
-          ctx.restore()
-        }
+      if (img) {
+        ctx.save()
+        hexPathInset(ctx, layout, cx, cy, -0.5)
+        ctx.clip()
+        const svgPad = 4
+        const over = 1
+        const drawW = layout.width + svgPad * 2 + over * 2
+        const drawH = layout.height + svgPad * 2 + over * 2
+        ctx.drawImage(img, cx - layout.size - svgPad - over, cy - layout.height / 2 - svgPad - over, drawW, drawH)
+        ctx.restore()
       } else {
         // Empty cell: inset border so it doesn't bleed into neighbors
         hexPathInset(ctx, layout, cx, cy, inset)
@@ -140,14 +142,40 @@ function draw() {
   ctx.fillStyle = '#888'
   ctx.font = '13px system-ui'
   if (hovered) {
-    const tile = getTile(hovered.q, hovered.r)
+    const placed = isPlaced(hovered.q, hovered.r)
     let text = `(${hovered.q}, ${hovered.r})`
-    if (tile) {
-      text += `  family ${tile.ka}-${tile.kb}-${tile.kc}  idx ${tile.catalanIndex}`
-    }
+    if (placed) text += '  placed'
     ctx.fillText(text, 12, h - 12)
   }
 }
+
+// ── Occupancy bitmap refresh ──
+
+let viewportDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleViewportRefresh() {
+  if (viewportDebounceTimer !== null) clearTimeout(viewportDebounceTimer)
+  viewportDebounceTimer = setTimeout(() => {
+    viewportDebounceTimer = null
+    const w = canvas.clientWidth
+    const h = canvas.clientHeight
+    const pad = layout.width
+    const [wx0, wy0] = screenToWorld(-pad, -pad)
+    const [wx1, wy1] = screenToWorld(w + pad, h + pad)
+    const qMin = Math.floor(wx0 / layout.colStep) - 1
+    const qMax = Math.ceil(wx1 / layout.colStep) + 1
+    const rMin = Math.floor(wy0 / layout.rowStep) - 1
+    const rMax = Math.ceil(wy1 / layout.rowStep) + 1
+    refreshBitmap(qMin, qMax, rMin, rMax).then(() => {
+      queueConstraintAnalysis(qMin, qMax, rMin, rMax)
+    })
+  }, 200)
+}
+
+// Periodic frontier refresh (every 12 seconds)
+setInterval(() => {
+  refreshFrontier()
+}, 12_000)
 
 // ── Interaction: pan, zoom, hover ──
 
@@ -177,6 +205,7 @@ canvas.addEventListener('pointermove', (e) => {
     camera.y -= dy / camera.zoom
     lastMouse = { x: e.clientX, y: e.clientY }
     draw()
+    scheduleViewportRefresh()
   } else {
     // Hover detection — pixelToHex returns wrapped coords, but we also
     // need the raw world-space column/row for drawing the highlight.
@@ -214,6 +243,7 @@ canvas.addEventListener('wheel', (e) => {
   camera.y -= wy2 - wy
 
   draw()
+  scheduleViewportRefresh()
 }, { passive: false })
 
 // ── Tile info panel ──
@@ -236,35 +266,235 @@ function closeTilePanel() {
   draw()
 }
 
+/** Extract a human-readable message from RPC/MetaMask errors (which are plain objects, not Error instances). */
+function extractErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  if (typeof err === 'object' && err !== null) {
+    const obj = err as Record<string, unknown>
+    // MetaMask wraps revert data in data.message or data.data.message
+    if (obj.data && typeof obj.data === 'object') {
+      const data = obj.data as Record<string, unknown>
+      if (typeof data.message === 'string') return data.message
+    }
+    if (typeof obj.message === 'string') return obj.message
+  }
+  return String(err)
+}
+
+type MintState = 'idle' | 'confirming' | 'pending' | 'confirmed' | 'done' | 'error'
+
+
+// ── Mint UI state held across renders ──
+interface MintUIState {
+  q: number
+  r: number
+  constraints: TileConstraints
+  eps: [number, number, number]
+  ethPrice: bigint | null
+  usdcPrice: bigint | null
+  flowState: MintState
+  txHash: string | null
+  errorMsg: string | null
+}
+
+const AXIS_NAMES = ['ka', 'kb', 'kc']
+
+function renderMintArea(el: HTMLElement, s: MintUIState) {
+  if (!selectedTile || selectedTile.q !== s.q || selectedTile.r !== s.r) return
+  let html = ''
+
+  if (s.flowState === 'idle') {
+    // EP controls
+    html += `<div class="tile-panel-ep-controls">`
+    for (let axis = 0; axis < 3; axis++) {
+      const free = s.constraints.freeAxes.has(axis)
+      const val = s.eps[axis]
+      html += `<div class="tile-panel-ep-row">`
+      html += `<span class="tile-panel-ep-label">${AXIS_NAMES[axis]}</span>`
+      if (free) {
+        const canDec = nextValidValue(axis, s.eps, -1, s.constraints) !== null
+        const canInc = nextValidValue(axis, s.eps, 1, s.constraints) !== null
+        html += `<button class="tile-panel-ep-btn" data-axis="${axis}" data-dir="-1"${canDec ? '' : ' disabled'}>-</button>`
+        html += `<span class="tile-panel-ep-val">${val}</span>`
+        html += `<button class="tile-panel-ep-btn" data-axis="${axis}" data-dir="1"${canInc ? '' : ' disabled'}>+</button>`
+      } else {
+        html += `<span class="tile-panel-ep-val tile-panel-ep-locked">${val}</span>`
+        html += `<span class="tile-panel-ep-lock">locked</span>`
+      }
+      html += `</div>`
+    }
+    const epSum = s.eps[0] + s.eps[1] + s.eps[2]
+    const familySize = catalan(epSum)
+    html += `<div class="tile-panel-field"><span class="tile-panel-label">Family size</span><span class="tile-panel-value mono">C(${epSum}) = ${familySize.toLocaleString()}</span></div>`
+    html += `</div>`
+
+    // Prices + balances
+    const ethBal = getEthBalance()
+    const usdcBal = getUsdcBalance()
+    if (s.ethPrice !== null) {
+      html += `<div class="tile-panel-field"><span class="tile-panel-label">ETH price</span><span class="tile-panel-value mono">${formatEther(s.ethPrice)} ETH</span></div>`
+    }
+    if (s.usdcPrice !== null) {
+      html += `<div class="tile-panel-field"><span class="tile-panel-label">USDC price</span><span class="tile-panel-value mono">${formatUnits(s.usdcPrice, 6)} USDC</span></div>`
+    }
+
+    // Buttons
+    const connected = isConnected()
+    const correctChain = isCorrectChain()
+    if (!connected) {
+      html += `<button class="tile-panel-mint-btn" disabled>Connect wallet</button>`
+    } else if (!correctChain) {
+      html += `<button class="tile-panel-mint-btn" disabled>Switch network</button>`
+    } else {
+      const ethDisabled = s.ethPrice !== null && ethBal !== null && parseFloat(ethBal) < parseFloat(formatEther(s.ethPrice))
+      const usdcDisabled = s.usdcPrice !== null && usdcBal !== null && parseFloat(usdcBal) < parseFloat(formatUnits(s.usdcPrice, 6))
+      html += `<button class="tile-panel-mint-btn" id="mint-eth-btn"${ethDisabled ? ' disabled title="Insufficient ETH"' : ''}>Mint with ETH</button>`
+      html += `<button class="tile-panel-mint-btn" id="mint-usdc-btn"${usdcDisabled ? ' disabled title="Insufficient USDC"' : ''}>Mint with USDC</button>`
+    }
+  } else if (s.flowState === 'confirming') {
+    html = `<div class="tile-panel-mint-status">Confirm in wallet...</div>`
+  } else if (s.flowState === 'pending') {
+    html = `<div class="tile-panel-mint-status">Transaction pending...</div>`
+    if (s.txHash) {
+      html += `<a class="tile-panel-tx-link" href="${BLOCK_EXPLORER}/tx/${s.txHash}" target="_blank" rel="noopener">${s.txHash.slice(0, 10)}...${s.txHash.slice(-8)}</a>`
+    }
+  } else if (s.flowState === 'confirmed') {
+    html = `<div class="tile-panel-mint-status">Minted! Generating artwork...</div>`
+    if (s.txHash) {
+      html += `<a class="tile-panel-tx-link" href="${BLOCK_EXPLORER}/tx/${s.txHash}" target="_blank" rel="noopener">${s.txHash.slice(0, 10)}...${s.txHash.slice(-8)}</a>`
+    }
+  } else if (s.flowState === 'error') {
+    html = `<div class="tile-panel-mint-status tile-panel-error">${s.errorMsg ?? 'Unknown error'}</div>`
+    html += `<button class="tile-panel-mint-btn" id="mint-retry-btn">Try again</button>`
+  }
+
+  el.innerHTML = html
+
+  // Bind EP stepper buttons
+  if (s.flowState === 'idle') {
+    for (const btn of el.querySelectorAll<HTMLButtonElement>('.tile-panel-ep-btn')) {
+      btn.addEventListener('click', () => {
+        const axis = Number(btn.dataset.axis)
+        const dir = Number(btn.dataset.dir) as 1 | -1
+        const next = nextValidValue(axis, s.eps, dir, s.constraints)
+        if (next !== null) s.eps[axis] = next
+        renderMintArea(el, s)
+        bindMintButtons(el, s)
+      })
+    }
+  }
+}
+
+async function runMintFlow(s: MintUIState, method: 'eth' | 'usdc') {
+  const el = document.getElementById('tile-mint-area')
+  if (!el) return
+
+  const { q, r, eps } = s
+  const [ka, kb, kc] = eps
+
+  try {
+    s.flowState = 'confirming'
+    renderMintArea(el, s)
+
+    const catalanIndex = await pickCatalanIndex(ka, kb, kc)
+    console.log(`Mint (${q},${r}): ka=${ka} kb=${kb} kc=${kc} idx=${catalanIndex}`)
+
+    let txHash: string
+    if (method === 'eth') {
+      txHash = await placeTileETH(q, r, ka, kb, kc, catalanIndex)
+    } else {
+      const price = s.usdcPrice ?? await fetchPriceUSDC()
+      const auth = await signUsdcAuthorization(price)
+      txHash = await placeTileUSDC(
+        auth.from, q, r, ka, kb, kc, catalanIndex,
+        auth.validAfter, auth.validBefore, auth.nonce, auth.v, auth.r, auth.s,
+      )
+    }
+
+    s.flowState = 'pending'
+    s.txHash = txHash
+    renderMintArea(el, s)
+
+    const receipt = await waitForReceipt(txHash)
+    if (!receipt.status) {
+      s.flowState = 'error'
+      s.errorMsg = 'Transaction reverted'
+      renderMintArea(el, s)
+      return
+    }
+
+    s.flowState = 'confirmed'
+    renderMintArea(el, s)
+    await awaitTilePlacement(q, r)
+
+    showTilePanel(q, r)
+  } catch (err: unknown) {
+    console.error('Mint error:', err)
+    const msg = extractErrorMessage(err)
+    if (msg.includes('rejected') || msg.includes('denied') || msg.includes('User denied')) {
+      s.flowState = 'idle'
+      renderMintArea(el, s)
+      bindMintButtons(el, s)
+      return
+    }
+    s.flowState = 'error'
+    s.errorMsg = msg
+    renderMintArea(el, s)
+    document.getElementById('mint-retry-btn')?.addEventListener('click', () => {
+      s.flowState = 'idle'
+      s.errorMsg = null
+      s.txHash = null
+      renderMintArea(el, s)
+      bindMintButtons(el, s)
+    })
+  }
+}
+
+function bindMintButtons(_el: HTMLElement, s: MintUIState) {
+  document.getElementById('mint-eth-btn')?.addEventListener('click', () => {
+    runMintFlow(s, 'eth')
+  })
+  document.getElementById('mint-usdc-btn')?.addEventListener('click', () => {
+    runMintFlow(s, 'usdc')
+  })
+}
+
 function showTilePanel(q: number, r: number) {
   selectedTile = { q, r }
-  const tile = getTile(q, r)
+  const placed = isPlaced(q, r)
   const tokenId = tokenIdOf(q, r)
 
   let html = `<button class="tile-panel-close">&times;</button>`
   html += `<div class="tile-panel-title">Tile (${q}, ${r})</div>`
   html += `<div class="tile-panel-field"><span class="tile-panel-label">Token ID</span><span class="tile-panel-value">${tokenId}</span></div>`
 
-  if (tile) {
-    html += `<div class="tile-panel-field"><span class="tile-panel-label">Family</span><span class="tile-panel-value">${tile.ka}-${tile.kb}-${tile.kc}</span></div>`
-    html += `<div class="tile-panel-field"><span class="tile-panel-label">Catalan index</span><span class="tile-panel-value">${tile.catalanIndex}</span></div>`
+  // Metadata placeholder (filled from CDN JSON)
+  html += `<div id="tile-metadata">`
+  if (placed) {
+    const cached = getTile(q, r)
+    if (cached) {
+      html += `<div class="tile-panel-field"><span class="tile-panel-label">Family</span><span class="tile-panel-value">${cached.ka}-${cached.kb}-${cached.kc}</span></div>`
+      html += `<div class="tile-panel-field"><span class="tile-panel-label">Catalan index</span><span class="tile-panel-value">${cached.catalanIndex}</span></div>`
+    } else {
+      html += `<span class="tile-panel-loading">Loading metadata...</span>`
+    }
   } else {
     html += `<div class="tile-panel-empty">Empty cell</div>`
   }
+  html += `</div>`
 
   // On-chain data placeholder (filled async)
   html += `<div class="tile-panel-chain" id="tile-chain-data">`
   if (isConnected() && NFT_ADDRESS) {
     html += `<span class="tile-panel-loading">Loading on-chain data...</span>`
-  } else {
-    html += `<span class="tile-panel-loading">Connect wallet to view on-chain data</span>`
   }
   html += `</div>`
 
-  // Explorer link
-  if (NFT_ADDRESS) {
-    html += `<a class="tile-panel-explorer" href="${BLOCK_EXPLORER}/token/${NFT_ADDRESS}?a=${tokenId}" target="_blank" rel="noopener">View on explorer</a>`
-  }
+  // Mint area (filled async for unminted tiles)
+  html += `<div id="tile-mint-area"></div>`
+
+  // Explorer link — only shown for minted tiles (populated async)
+  html += `<div id="tile-explorer-link"></div>`
 
   // Share link
   html += `<a class="tile-panel-link" href="#tile=${q},${r}">Permalink</a>`
@@ -274,15 +504,38 @@ function showTilePanel(q: number, r: number) {
 
   tilePanel.querySelector('.tile-panel-close')?.addEventListener('click', closeTilePanel)
 
-  // Fetch on-chain data
-  if (isConnected() && NFT_ADDRESS) {
-    fetchTile(q, r).then((onChain: OnChainTile) => {
-      // Check we're still showing the same tile
+  // Fetch JSON metadata from CDN (if placed and not cached)
+  if (placed && !getTile(q, r)) {
+    fetchMetadata(q, r).then(tile => {
       if (!selectedTile || selectedTile.q !== q || selectedTile.r !== r) return
-      const el = document.getElementById('tile-chain-data')
-      if (!el) return
+      const metaEl = document.getElementById('tile-metadata')
+      if (!metaEl) return
+      if (tile) {
+        metaEl.innerHTML =
+          `<div class="tile-panel-field"><span class="tile-panel-label">Family</span><span class="tile-panel-value">${tile.ka}-${tile.kb}-${tile.kc}</span></div>` +
+          `<div class="tile-panel-field"><span class="tile-panel-label">Catalan index</span><span class="tile-panel-value">${tile.catalanIndex}</span></div>`
+      } else {
+        metaEl.innerHTML = `<span class="tile-panel-error">Metadata unavailable</span>`
+      }
+    })
+  }
 
-      const zeroAddr = '0x' + '0'.repeat(40)
+  // Fetch on-chain data (wallet connected only)
+  if (isConnected() && NFT_ADDRESS) {
+    const zeroAddr = '0x' + '0'.repeat(40)
+
+    // Load on-chain tile data + prices in parallel
+    const dataPromise = fetchTile(q, r)
+    const ethPricePromise = fetchPriceETH().catch(() => null as bigint | null)
+    const usdcPricePromise = fetchPriceUSDC().catch(() => null as bigint | null)
+
+    Promise.all([dataPromise, ethPricePromise, usdcPricePromise]).then(([onChain, ethPrice, usdcPrice]) => {
+      if (!selectedTile || selectedTile.q !== q || selectedTile.r !== r) return
+      const chainEl = document.getElementById('tile-chain-data')
+      const mintEl = document.getElementById('tile-mint-area')
+      const explorerEl = document.getElementById('tile-explorer-link')
+      if (!chainEl) return
+
       const owned = onChain.tileOwner !== zeroAddr
 
       let chainHtml = ''
@@ -290,10 +543,46 @@ function showTilePanel(q: number, r: number) {
         chainHtml += `<div class="tile-panel-field"><span class="tile-panel-label">Owner</span><span class="tile-panel-value mono" title="${onChain.tileOwner}">${shortAddr(onChain.tileOwner)}</span></div>`
         chainHtml += `<div class="tile-panel-field"><span class="tile-panel-label">Polarity</span><span class="tile-panel-value">${onChain.polarity ? '+' : '-'}</span></div>`
         chainHtml += `<div class="tile-panel-field"><span class="tile-panel-label">Family (chain)</span><span class="tile-panel-value">${onChain.ka}-${onChain.kb}-${onChain.kc}</span></div>`
+
+        // Show explorer link only for minted tiles
+        if (explorerEl) {
+          explorerEl.innerHTML = `<a class="tile-panel-explorer" href="${BLOCK_EXPLORER}/token/${NFT_ADDRESS}?a=${tokenId}" target="_blank" rel="noopener">View on explorer</a>`
+        }
       } else {
         chainHtml += `<div class="tile-panel-field"><span class="tile-panel-label">Status</span><span class="tile-panel-value">Not minted</span></div>`
+
+        // Only show mint controls if cell has at least one adjacent placed tile
+        let hasAdjacentTile = false
+        for (let edge = 0; edge < 6; edge++) {
+          const { q: nq, r: nr } = neighbor(q, r, edge)
+          if (isPlaced(nq, nr)) { hasAdjacentTile = true; break }
+        }
+
+        if (mintEl && hasAdjacentTile) {
+          mintEl.innerHTML = `<div class="tile-panel-mint-status">Loading constraints...</div>`
+          computeConstraints(q, r).then(constraints => {
+            if (!selectedTile || selectedTile.q !== q || selectedTile.r !== r) return
+            console.log(`Constraints (${q},${r}):`, {
+              fixed: constraints.fixed,
+              freeAxes: [...constraints.freeAxes],
+              defaults: constraints.defaults,
+              neighborFreeSums: constraints.neighborFreeSums,
+            })
+            const uiState: MintUIState = {
+              q, r, constraints,
+              eps: [...constraints.defaults],
+              ethPrice, usdcPrice,
+              flowState: 'idle',
+              txHash: null, errorMsg: null,
+            }
+            renderMintArea(mintEl, uiState)
+            bindMintButtons(mintEl, uiState)
+          }).catch(err => {
+            if (mintEl) mintEl.innerHTML = `<div class="tile-panel-mint-status tile-panel-error">${extractErrorMessage(err)}</div>`
+          })
+        }
       }
-      el.innerHTML = chainHtml
+      chainEl.innerHTML = chainHtml
     }).catch((err: unknown) => {
       const el = document.getElementById('tile-chain-data')
       if (el) el.innerHTML = `<span class="tile-panel-error">Failed to load</span>`
@@ -337,11 +626,13 @@ initMenu()
 setOnUpdate(draw)
 window.addEventListener('resize', resize)
 resize()
-loadGrid().then(() => {
-  const tile = parseTileHash()
-  if (tile) focusTile(tile[0], tile[1])
+
+// Focus on hash tile if present
+const hashTile = parseTileHash()
+if (hashTile) {
+  focusTile(hashTile[0], hashTile[1])
   draw()
-})
+}
 
 // Re-focus when hash changes (e.g. user edits URL or clicks a link)
 window.addEventListener('hashchange', () => {

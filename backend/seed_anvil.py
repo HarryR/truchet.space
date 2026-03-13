@@ -1,5 +1,7 @@
 """
-Seed ~20 initial tiles on Anvil by calling seedTiles() (batch) via `cast send`.
+Seed the initial tiles on Anvil.
+
+Computes the optimal seed grid via find_seed, then calls seedTiles() on-chain.
 
 Uses the Anvil deployer key (account 0):
   Private key: 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
@@ -14,41 +16,16 @@ import os
 import subprocess
 import sys
 
-from .seed import generate_cluster
+from .find_seed import find_seed
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CAST_BIN = os.path.join(ROOT, "contracts", "bin", "cast")
-DEPLOYER_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-DEPLOYER_ADDR = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+DEPLOYER_KEY = os.environ.get("DEPLOYER_KEY", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+DEPLOYER_ADDR = os.environ.get("DEPLOYER_ADDR", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
 RPC_URL = os.environ.get("ANVIL_RPC", "http://127.0.0.1:8545")
 
-
-def seed_tiles_batch(nft_address: str, to: str,
-                     tiles: list[tuple[int, int, int, int, int, bool, int]]) -> bool:
-    """Call seedTiles(address,uint16[],uint16[],uint8[],uint8[],uint8[],bool[],uint128[]) via cast."""
-    sig = "seedTiles(address,uint16[],uint16[],uint8[],uint8[],uint8[],bool[],uint128[])"
-
-    qs = "[" + ",".join(str(t[0]) for t in tiles) + "]"
-    rs = "[" + ",".join(str(t[1]) for t in tiles) + "]"
-    kas = "[" + ",".join(str(t[2]) for t in tiles) + "]"
-    kbs = "[" + ",".join(str(t[3]) for t in tiles) + "]"
-    kcs = "[" + ",".join(str(t[4]) for t in tiles) + "]"
-    pols = "[" + ",".join(str(t[5]).lower() for t in tiles) + "]"
-    idxs = "[" + ",".join(str(t[6]) for t in tiles) + "]"
-
-    cmd = [
-        CAST_BIN, "send",
-        nft_address,
-        sig,
-        to, qs, rs, kas, kbs, kcs, pols, idxs,
-        "--rpc-url", RPC_URL,
-        "--private-key", DEPLOYER_KEY,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"  FAILED: {result.stderr.strip()}")
-        return False
-    return True
+Q0, R0 = 0, 0
+WIDTH, HEIGHT = 5, 5
 
 
 def main() -> None:
@@ -66,28 +43,39 @@ def main() -> None:
         print("NFT_ADDRESS not set. Run extract-addresses.py first.")
         sys.exit(1)
 
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 20
-    print(f"Generating {n}-tile cluster and seeding on Anvil...")
+    print(f"Computing {WIDTH}×{HEIGHT} seed at ({Q0},{R0})...")
+    grid = find_seed(Q0, R0, WIDTH, HEIGHT)
+    n = len(grid.tiles)
+
+    print(f"Seeding {WIDTH}×{HEIGHT} block — {n} tiles")
     print(f"NFT address: {nft_address}")
 
-    grid, polarity = generate_cluster(n_tiles=n, max_attempts=500)
-    print(f"Generated {len(grid)} valid tiles")
+    for i, t in enumerate(grid.tiles):
+        pol = "+" if t.polarity else "-"
+        print(f"  ({t.q},{t.r}) ka={t.ka} kb={t.kb} kc={t.kc} idx={t.catalan_index} pol={pol}")
 
-    # Build ordered tile list (BFS order preserved by sorted — origin first)
-    tiles: list[tuple[int, int, int, int, int, bool, int]] = []
-    for (q, r), tile in sorted(grid.items()):
-        pol = polarity[(q, r)]
-        ka, kb, kc = tile["ka"], tile["kb"], tile["kc"]
-        idx = tile["catalanIndex"]
-        print(f"  ({q}, {r}) ka={ka} kb={kb} kc={kc} idx={idx} pol={int(pol)}")
-        tiles.append((q, r, ka, kb, kc, pol, idx))
+    sig = "seedTiles(address,uint16,uint16,uint8,uint8,uint8[],uint8[],uint8[],uint128[],uint256)"
+    cmd = [
+        CAST_BIN, "send",
+        nft_address,
+        sig,
+        DEPLOYER_ADDR,
+        str(grid.q0), str(grid.r0), str(grid.width), str(grid.height),
+        "[" + ",".join(str(x) for x in grid.kas) + "]",
+        "[" + ",".join(str(x) for x in grid.kbs) + "]",
+        "[" + ",".join(str(x) for x in grid.kcs) + "]",
+        "[" + ",".join(str(x) for x in grid.catalan_indexes) + "]",
+        str(grid.polarities),
+        "--rpc-url", RPC_URL,
+        "--private-key", DEPLOYER_KEY,
+    ]
 
-    print(f"\nSending batch seedTiles() for {len(tiles)} tiles...")
-    if seed_tiles_batch(nft_address, DEPLOYER_ADDR, tiles):
-        print(f"Seeded {len(tiles)} tiles on Anvil")
-    else:
-        print("Batch seed failed")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"FAILED: {result.stderr.strip()}")
         sys.exit(1)
+
+    print(f"Seeded {n} tiles on Anvil")
 
 
 if __name__ == "__main__":

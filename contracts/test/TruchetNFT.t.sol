@@ -74,7 +74,7 @@ contract TruchetNFTTest is Test {
         vm.deal(bob, 10 ether);
     }
 
-    // ── Helper: place via gate USDC with dummy auth params ──
+    // ── Helpers ───────────────────────────────────────────────
 
     function _placeUSDC(address who, address submitter, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci, bytes32 nonce) internal {
         vm.prank(submitter);
@@ -90,34 +90,135 @@ contract TruchetNFTTest is Test {
         gate.placeTileETH{value: PRICE_ETH}(q, r, ka, kb, kc, ci);
     }
 
+    /// @dev Seed a 1×1 block (single tile).
+    function _seed(address to, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, bool pol, uint128 idx) internal {
+        uint8[] memory kas = new uint8[](1); kas[0] = ka;
+        uint8[] memory kbs = new uint8[](1); kbs[0] = kb;
+        uint8[] memory kcs = new uint8[](1); kcs[0] = kc;
+        uint128[] memory idxs = new uint128[](1); idxs[0] = idx;
+        nft.seedTiles(to, q, r, 1, 1, kas, kbs, kcs, idxs, pol ? 1 : 0);
+    }
+
+    /// @dev Seed a 1×2 block (two tiles in the same column).
+    function _seed2(
+        address to, uint16 q, uint16 r0,
+        uint8 ka0, uint8 kb0, uint8 kc0, bool pol0, uint128 idx0,
+        uint8 ka1, uint8 kb1, uint8 kc1, bool pol1, uint128 idx1
+    ) internal {
+        uint8[] memory kas = new uint8[](2); kas[0] = ka0; kas[1] = ka1;
+        uint8[] memory kbs = new uint8[](2); kbs[0] = kb0; kbs[1] = kb1;
+        uint8[] memory kcs = new uint8[](2); kcs[0] = kc0; kcs[1] = kc1;
+        uint128[] memory idxs = new uint128[](2); idxs[0] = idx0; idxs[1] = idx1;
+        uint256 pols = (pol0 ? 1 : 0) | (pol1 ? 2 : 0);
+        nft.seedTiles(to, q, r0, 1, 2, kas, kbs, kcs, idxs, pols);
+    }
+
     // ── TilePlaced event ────────────────────────────────────
 
     function test_tilePlaced_emittedOnSeed() public {
         vm.expectEmit(true, true, true, true);
         emit TruchetNFT.TilePlaced(10, 20, alice, 3, 2, 1, true, 0);
-        nft.seedTile(alice, 10, 20, 3, 2, 1, true, 0);
+        _seed(alice, 10, 20, 3, 2, 1, true, 0);
     }
 
     function test_tilePlaced_emittedOnPlaceETH() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         vm.expectEmit(true, true, true, true);
-        // Shared edge ka=2 (even) → same polarity = true
         emit TruchetNFT.TilePlaced(11, 10, alice, 2, 2, 2, true, 1);
         _placeETH(alice, 11, 10, 2, 2, 2, 1);
     }
 
     function test_tilePlaced_polarityFlip() public {
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
+        _seed(alice, 10, 10, 3, 2, 1, true, 0);
         vm.expectEmit(true, true, true, true);
-        // Shared edge ka=3 (odd) → opposite polarity = false
         emit TruchetNFT.TilePlaced(11, 10, alice, 3, 2, 1, false, 1);
         _placeETH(alice, 11, 10, 3, 2, 1, 1);
     }
 
-    function test_seedTile_atOrigin() public {
-        // Boundary: neighbors wrap via torus topology
-        nft.seedTile(alice, 0, 0, 2, 1, 1, true, 0);
+    // ── Seed tiles ───────────────────────────────────────────
+
+    function test_seedTiles() public {
+        _seed(alice, 10, 20, 3, 2, 1, true, 0);
+        uint256 tokenId = nft.tokenIdOf(10, 20);
+        assertEq(nft.ownerOf(tokenId), alice);
+        assertEq(nft.balanceOf(alice), 1);
         assertEq(nft.totalSupply(), 1);
+
+        (uint8 ka, uint8 kb, uint8 kc, bool polarity, uint128 catalanIndex, address tileOwner) = nft.getTile(10, 20);
+        assertEq(ka, 3);
+        assertEq(kb, 2);
+        assertEq(kc, 1);
+        assertTrue(polarity);
+        assertEq(catalanIndex, 0);
+        assertEq(tileOwner, alice);
+    }
+
+    function test_seedTiles_atOrigin() public {
+        _seed(alice, 0, 0, 2, 1, 1, true, 0);
+        assertEq(nft.totalSupply(), 1);
+    }
+
+    function test_seedTiles_onlyOwner() public {
+        uint8[] memory kas = new uint8[](1); kas[0] = 2;
+        uint8[] memory kbs = new uint8[](1); kbs[0] = 1;
+        uint8[] memory kcs = new uint8[](1); kcs[0] = 1;
+        uint128[] memory idxs = new uint128[](1);
+        vm.prank(alice);
+        vm.expectRevert(TruchetNFT.NotOwner.selector);
+        nft.seedTiles(alice, 10, 10, 1, 1, kas, kbs, kcs, idxs, 1);
+    }
+
+    function test_seedTiles_alreadySeeded() public {
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
+        assertTrue(nft.seeded());
+        // Second call reverts
+        uint8[] memory kas = new uint8[](1); kas[0] = 2;
+        uint8[] memory kbs = new uint8[](1); kbs[0] = 2;
+        uint8[] memory kcs = new uint8[](1); kcs[0] = 2;
+        uint128[] memory idxs = new uint128[](1); idxs[0] = 1;
+        vm.expectRevert(TruchetNFT.AlreadySeeded.selector);
+        nft.seedTiles(alice, 50, 50, 1, 1, kas, kbs, kcs, idxs, 1);
+    }
+
+    function test_seedTiles_batch() public {
+        // 2×2 block at (10,10): column-major → [col0row0, col0row1, col1row0, col1row1]
+        // (10,10), (10,11), (11,10), (11,11)
+        uint8[] memory kas = new uint8[](4);
+        uint8[] memory kbs = new uint8[](4);
+        uint8[] memory kcs = new uint8[](4);
+        uint128[] memory idxs = new uint128[](4);
+        for (uint256 j = 0; j < 4; j++) {
+            kas[j] = 2; kbs[j] = 2; kcs[j] = 2; idxs[j] = uint128(j);
+        }
+        // All polarities true → bits 0-3 set = 0xF
+        nft.seedTiles(alice, 10, 10, 2, 2, kas, kbs, kcs, idxs, 0xF);
+        assertEq(nft.totalSupply(), 4);
+        assertEq(nft.ownerOf(nft.tokenIdOf(10, 10)), alice);
+        assertEq(nft.ownerOf(nft.tokenIdOf(10, 11)), alice);
+        assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
+        assertEq(nft.ownerOf(nft.tokenIdOf(11, 11)), alice);
+    }
+
+    function test_seedTiles_batch_onlyOwner() public {
+        uint8[] memory kas = new uint8[](1); kas[0] = 2;
+        uint8[] memory kbs = new uint8[](1); kbs[0] = 1;
+        uint8[] memory kcs = new uint8[](1); kcs[0] = 1;
+        uint128[] memory idxs = new uint128[](1);
+        vm.prank(alice);
+        vm.expectRevert(TruchetNFT.NotOwner.selector);
+        nft.seedTiles(alice, 10, 10, 1, 1, kas, kbs, kcs, idxs, 1);
+    }
+
+    function test_seedTiles_polarityBits() public {
+        // 1×2 block: tile 0 polarity=true, tile 1 polarity=false
+        // polarities = 0b01 = 1
+        _seed2(alice, 10, 10,
+            2, 2, 2, true, 0,
+            2, 2, 2, false, 1);
+        (, , , bool pol0, ,) = nft.getTile(10, 10);
+        (, , , bool pol1, ,) = nft.getTile(10, 11);
+        assertTrue(pol0);
+        assertFalse(pol1);
     }
 
     // ── Token ID ──────────────────────────────────────────────
@@ -138,123 +239,34 @@ contract TruchetNFTTest is Test {
     }
 
     function test_tokenIdOf_wraps() public view {
-        // 512 wraps to 0, 513 wraps to 1
         assertEq(nft.tokenIdOf(512, 512), nft.tokenIdOf(0, 0));
         assertEq(nft.tokenIdOf(513, 513), nft.tokenIdOf(1, 1));
     }
 
     function test_tokenURI() public {
-        nft.seedTile(alice, 5, 12, 3, 2, 1, true, 0);
+        _seed(alice, 5, 12, 3, 2, 1, true, 0);
         uint256 tokenId = nft.tokenIdOf(5, 12);
         assertEq(nft.tokenURI(tokenId), "https://tiles.truchet.space/5-12.json");
-    }
-
-    // ── Seed tiles ───────────────────────────────────────────
-
-    function test_seedTile() public {
-        nft.seedTile(alice, 10, 20, 3, 2, 1, true, 0);
-        uint256 tokenId = nft.tokenIdOf(10, 20);
-        assertEq(nft.ownerOf(tokenId), alice);
-        assertEq(nft.balanceOf(alice), 1);
-        assertEq(nft.totalSupply(), 1);
-
-        (uint8 ka, uint8 kb, uint8 kc, bool polarity, uint128 catalanIndex, address tileOwner) = nft.getTile(10, 20);
-        assertEq(ka, 3);
-        assertEq(kb, 2);
-        assertEq(kc, 1);
-        assertTrue(polarity);
-        assertEq(catalanIndex, 0);
-        assertEq(tileOwner, alice);
-    }
-
-    function test_seedTile_onlyOwner() public {
-        vm.prank(alice);
-        vm.expectRevert(TruchetNFT.NotOwner.selector);
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
-    }
-
-    function test_seedTile_noAdjacencyRequired() public {
-        nft.seedTile(alice, 100, 200, 3, 2, 1, true, 0);
-        assertEq(nft.totalSupply(), 1);
-    }
-
-    function test_seedTile_cellOccupied() public {
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
-        vm.expectRevert(abi.encodeWithSelector(TruchetNFT.CellOccupied.selector, uint16(10), uint16(10)));
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 1);
-    }
-
-    function test_seedTile_duplicateFamilyCatalan() public {
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
-        vm.expectRevert(
-            abi.encodeWithSelector(TruchetNFT.CatalanIndexUsed.selector, uint8(3), uint8(2), uint8(1), uint128(0))
-        );
-        nft.seedTile(alice, 50, 50, 3, 2, 1, true, 0);
-    }
-
-    function test_seedTile_invalidEpCount() public {
-        vm.expectRevert(TruchetNFT.InvalidEpCount.selector);
-        nft.seedTile(alice, 10, 10, 0, 0, 0, true, 0);
-    }
-
-    // ── Batch seed ────────────────────────────────────────────
-
-    function test_seedTiles_batch() public {
-        uint16[] memory qs = new uint16[](3);
-        uint16[] memory rs = new uint16[](3);
-        uint8[] memory kas = new uint8[](3);
-        uint8[] memory kbs = new uint8[](3);
-        uint8[] memory kcs = new uint8[](3);
-        bool[] memory pols = new bool[](3);
-        uint128[] memory idxs = new uint128[](3);
-
-        // Tile 0: seed at (10,10)
-        qs[0] = 10; rs[0] = 10; kas[0] = 2; kbs[0] = 2; kcs[0] = 2; pols[0] = true; idxs[0] = 0;
-        // Tile 1: neighbor at (11,10) — edge 0 of (10,10), shared ka=2
-        qs[1] = 11; rs[1] = 10; kas[1] = 2; kbs[1] = 2; kcs[1] = 2; pols[1] = true; idxs[1] = 1;
-        // Tile 2: neighbor at (10,11) — edge 1 of (10,10), shared kb=2
-        qs[2] = 10; rs[2] = 11; kas[2] = 2; kbs[2] = 2; kcs[2] = 2; pols[2] = true; idxs[2] = 2;
-
-        nft.seedTiles(alice, qs, rs, kas, kbs, kcs, pols, idxs);
-        assertEq(nft.totalSupply(), 3);
-        assertEq(nft.ownerOf(nft.tokenIdOf(10, 10)), alice);
-        assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
-        assertEq(nft.ownerOf(nft.tokenIdOf(10, 11)), alice);
-    }
-
-    function test_seedTiles_batch_onlyOwner() public {
-        uint16[] memory qs = new uint16[](1);
-        uint16[] memory rs = new uint16[](1);
-        uint8[] memory kas = new uint8[](1);
-        uint8[] memory kbs = new uint8[](1);
-        uint8[] memory kcs = new uint8[](1);
-        bool[] memory pols = new bool[](1);
-        uint128[] memory idxs = new uint128[](1);
-        qs[0] = 10; rs[0] = 10; kas[0] = 2; kbs[0] = 1; kcs[0] = 1; pols[0] = true; idxs[0] = 0;
-
-        vm.prank(alice);
-        vm.expectRevert(TruchetNFT.NotOwner.selector);
-        nft.seedTiles(alice, qs, rs, kas, kbs, kcs, pols, idxs);
     }
 
     // ── Place tiles via gate ETH ────────────────────────────
 
     function test_placeTileETH() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         _placeETH(alice, 11, 10, 2, 2, 2, 1);
         assertEq(nft.totalSupply(), 2);
         assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
     }
 
     function test_placeTileETH_pullsETH() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 gateBefore = address(gate).balance;
         _placeETH(alice, 11, 10, 2, 2, 2, 1);
         assertEq(address(gate).balance - gateBefore, PRICE_ETH);
     }
 
     function test_placeTileETH_wrongValue() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         vm.prank(alice);
         vm.expectRevert(TruchetGate.WrongETH.selector);
         gate.placeTileETH{value: 0.001 ether}(11, 10, 2, 2, 2, 1);
@@ -263,27 +275,27 @@ contract TruchetNFTTest is Test {
     // ── Place tiles via gate USDC ───────────────────────────
 
     function test_placeTileUSDC() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         _placeUSDC(alice, 11, 10, 2, 2, 2, 1);
         assertEq(nft.totalSupply(), 2);
         assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
     }
 
     function test_placeTileUSDC_viaRelayer() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         _placeUSDC(alice, relayer, 11, 10, 2, 2, 2, 1, keccak256("nonce1"));
         assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
     }
 
     function test_placeTileUSDC_pullsUSDC() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 gateBefore = usdc.balanceOf(address(gate));
         _placeUSDC(alice, 11, 10, 2, 2, 2, 1);
         assertEq(usdc.balanceOf(address(gate)) - gateBefore, PRICE_USDC);
     }
 
     function test_placeTileUSDC_duplicateNonce() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         bytes32 nonce = keccak256("nonce1");
         _placeUSDC(alice, alice, 11, 10, 2, 2, 2, 1, nonce);
         vm.expectRevert("nonce used");
@@ -315,7 +327,7 @@ contract TruchetNFTTest is Test {
     }
 
     function test_gate_withdraw() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         _placeETH(alice, 11, 10, 2, 2, 2, 1);
         _placeUSDC(alice, 10, 11, 2, 2, 2, 2);
 
@@ -331,14 +343,13 @@ contract TruchetNFTTest is Test {
     // ── Tile placement constraints ──────────────────────────
 
     function test_placeTile_notAdjacent() public {
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
+        _seed(alice, 10, 10, 3, 2, 1, true, 0);
         vm.expectRevert(abi.encodeWithSelector(TruchetNFT.NotAdjacent.selector, uint16(50), uint16(50)));
         _placeETH(alice, 50, 50, 3, 2, 1, 1);
     }
 
     function test_placeTile_edgeMismatch() public {
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
-        // Edge 0 (right) of (10,10) is ka=3; placing at (11,10) with ka=2 should fail
+        _seed(alice, 10, 10, 3, 2, 1, true, 0);
         vm.expectRevert(
             abi.encodeWithSelector(TruchetNFT.EdgeMismatch.selector, uint16(11), uint16(10), uint8(3), uint8(3), uint8(2))
         );
@@ -346,35 +357,34 @@ contract TruchetNFTTest is Test {
     }
 
     function test_placeTile_multipleNeighbors() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
-        nft.seedTile(alice, 10, 11, 2, 2, 2, true, 1);
-        // (11,10) neighbors both (10,10) via edge 0 and (10,11) — both have matching EPs
+        // Seed 1×2 block: (10,10) and (10,11)
+        _seed2(alice, 10, 10,
+            2, 2, 2, true, 0,
+            2, 2, 2, true, 1);
+        // (11,10) neighbors both — both have matching EPs
         _placeETH(alice, 11, 10, 2, 2, 2, 2);
         assertEq(nft.totalSupply(), 3);
     }
 
     function test_placeTile_notGate() public {
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
-        // Direct call to placeTile without going through gate
+        _seed(alice, 10, 10, 3, 2, 1, true, 0);
         vm.prank(alice);
         vm.expectRevert(TruchetNFT.NotGate.selector);
         nft.placeTile(alice, 11, 10, 3, 2, 1, 1);
     }
 
     function test_placeTile_epSumDeltaTooLarge() public {
-        // Seed with sum=6
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
-        // Try to place with ka=3 (matching) but kb=5,kc=5 → sum=13, delta=7
+        // Seed (3,2,1) → place (3,5,5): axis 0 constrained (ka=3), free axes 1,2.
+        // Our free sum = 5+5=10, neighbor free sum = 2+1=3, delta=7 > 2.
+        _seed(alice, 10, 10, 3, 2, 1, true, 0);
         vm.expectRevert(
-            abi.encodeWithSelector(TruchetNFT.EpSumDeltaTooLarge.selector, uint16(11), uint16(10), uint16(13), uint16(6))
+            abi.encodeWithSelector(TruchetNFT.EpSumDeltaTooLarge.selector, uint16(11), uint16(10), uint16(10), uint16(3))
         );
         _placeETH(alice, 11, 10, 3, 5, 5, 1);
     }
 
     function test_placeTile_epSumDeltaWithin2() public {
-        // Seed with sum=6 (2+2+2)
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
-        // Place with ka=2 (matching), sum=8 (2+4+2), delta=2 — should succeed
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         _placeETH(alice, 11, 10, 2, 4, 2, 1);
         assertEq(nft.totalSupply(), 2);
     }
@@ -382,43 +392,117 @@ contract TruchetNFTTest is Test {
     // ── Polarity ─────────────────────────────────────────────
 
     function test_polarity_evenEp_samePolarity() public {
-        // Seed tile at (10,10) with ka=2 → polarity=true (default)
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
-        // Place at (11,10) — shared edge ka=2 (even) → same polarity = true
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         _placeETH(alice, 11, 10, 2, 2, 2, 1);
         (, , , bool pol, ,) = nft.getTile(11, 10);
         assertTrue(pol);
     }
 
     function test_polarity_oddEp_flipsPolarity() public {
-        // Seed tile at (10,10) with ka=3 → polarity=true (default)
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
-        // Place at (11,10) — shared edge ka=3 (odd) → flipped polarity = false
+        _seed(alice, 10, 10, 3, 2, 1, true, 0);
         _placeETH(alice, 11, 10, 3, 2, 1, 1);
         (, , , bool pol, ,) = nft.getTile(11, 10);
         assertFalse(pol);
     }
 
     function test_polarity_multipleNeighborAgreement() public {
-        // Two neighbors that agree on required polarity
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
-        _placeETH(alice, 10, 11, 2, 2, 2, 1);
-        // Both (10,10) and (10,11) have polarity=true, and shared edges are even EP
-        // so any cell adjacent to both should also get polarity=true
-        assertEq(nft.totalSupply(), 2);
+        // Seed 1×2 block, then place via gate — both agree on polarity
+        _seed2(alice, 10, 10,
+            2, 2, 2, true, 0,
+            2, 2, 2, true, 1);
+        _placeETH(alice, 11, 10, 2, 2, 2, 2);
+        assertEq(nft.totalSupply(), 3);
     }
 
-    // ── Polarity dead cell (lookahead) ──────────────────────
+    // ── Polarity: mixed-family regression tests ───────────
 
-    function test_polarity_deadCell_reverts() public {
-        // Create a scenario where placing a tile would make an empty neighbor unplaceable
-        nft.seedTile(alice, 10, 10, 3, 2, 1, true, 0);
-        // Place at (11,10) — shared ka=3 (odd) → polarity=false
+    function test_polarity_mixedFamily_510_1() public {
+        // Seed (511,0) and (511,1) both family 2-3-2 positive.
+        _seed2(alice, 511, 0,
+            2, 3, 2, true, 0,
+            2, 3, 2, true, 1);
+        // Place (510,1) family 5-2-2. q=510 is even.
+        // Edge 0 → (511,1) axis 0: our ka=5, nb ka=2 → EdgeMismatch revert.
+        vm.expectRevert(
+            abi.encodeWithSelector(TruchetNFT.EdgeMismatch.selector, uint16(510), uint16(1), uint8(0), uint8(2), uint8(5))
+        );
+        _placeETH(alice, 510, 1, 5, 2, 2, 2);
+    }
+
+    function test_polarity_mixedFamily_511_0() public {
+        // Seed (0,0) and (0,1) both family 2-2-2 positive.
+        _seed2(alice, 0, 0,
+            2, 2, 2, true, 0,
+            2, 2, 2, true, 1);
+        // Place (511,0) family 2-3-2. q=511 is odd.
+        // Edge 5 → (0,0) axis 2, col crossing, odd→even: fab_nb = (nb.ka+nb.kb)&1 = (2+2)&1 = 0 → no flip → true
+        // Edge 0 → (0,1) axis 0, col crossing, odd→even: fab_nb = (nb.ka+nb.kb)&1 = (2+2)&1 = 0 → no flip → true
+        // Both agree: positive polarity.
+        _placeETH(alice, 511, 0, 2, 3, 2, 2);
+        (, , , bool pol, ,) = nft.getTile(511, 0);
+        assertTrue(pol, "(511,0) 2-3-2 next to 2-2-2 neighbors should be positive");
+    }
+
+    function test_polarity_mixedFamily_2_510() public {
+        // Exact reproduction from bad-polarity.txt.
+        // Seed: (0,0), (1,0), (2,0) all 2-2-2 positive.
+        uint8[] memory kas = new uint8[](3);
+        uint8[] memory kbs = new uint8[](3);
+        uint8[] memory kcs = new uint8[](3);
+        uint128[] memory idxs = new uint128[](3);
+        for (uint256 i = 0; i < 3; i++) {
+            kas[i] = 2; kbs[i] = 2; kcs[i] = 2; idxs[i] = uint128(i);
+        }
+        nft.seedTiles(alice, 0, 0, 3, 1, kas, kbs, kcs, idxs, 0x7);
+
+        // Place tiles in order:
+        _placeETH(alice, 0, 511, 2, 2, 2, 3);   // (0,511) 2-2-2 → positive
+        (, , , bool p0, ,) = nft.getTile(0, 511);
+        assertTrue(p0, "(0,511) should be positive");
+
+        _placeETH(alice, 1, 511, 2, 2, 2, 4);   // (1,511) 2-2-2 → positive
+        (, , , bool p1, ,) = nft.getTile(1, 511);
+        assertTrue(p1, "(1,511) should be positive");
+
+        _placeETH(alice, 2, 511, 4, 2, 2, 0);   // (2,511) 4-2-2 → positive
+        (, , , bool p2, ,) = nft.getTile(2, 511);
+        assertTrue(p2, "(2,511) should be positive");
+
+        _placeETH(alice, 1, 510, 4, 2, 2, 1);   // (1,510) 4-2-2 → positive
+        (, , , bool p3, ,) = nft.getTile(1, 510);
+        assertTrue(p3, "(1,510) should be positive");
+
+        _placeETH(alice, 2, 510, 5, 2, 2, 0);   // (2,510) 5-2-2 → should be NEGATIVE
+        (, , , bool p4, ,) = nft.getTile(2, 510);
+        assertFalse(p4, "(2,510) 5-2-2 should be negative");
+    }
+
+    function test_polarity_mixedFamily_510_2() public {
+        // Seed: (511,1) and (511,2) as 2-2-2 positive.
+        uint8[] memory kas = new uint8[](2);
+        uint8[] memory kbs = new uint8[](2);
+        uint8[] memory kcs = new uint8[](2);
+        uint128[] memory idxs = new uint128[](2);
+        for (uint256 i = 0; i < 2; i++) {
+            kas[i] = 2; kbs[i] = 2; kcs[i] = 2; idxs[i] = uint128(i);
+        }
+        nft.seedTiles(alice, 511, 1, 2, 1, kas, kbs, kcs, idxs, 0x3);
+
+        // Place (510,2) as 2-3-2 — should be negative.
+        _placeETH(alice, 510, 2, 2, 3, 2, 0);
+        (, , , bool pol, ,) = nft.getTile(510, 2);
+        assertTrue(pol, "(510,2) 2-3-2 should be positive");
+    }
+
+    // ── Polarity (no dead-cell lookahead) ──────────────────
+
+    function test_polarity_noLookahead_allowsPlacement() public {
+        // Previously reverted with PolarityDeadCell — now allowed since
+        // lookahead was removed. Dead cells may exist but aren't prevented.
+        _seed(alice, 10, 10, 3, 2, 1, true, 0);
         _placeETH(alice, 11, 10, 3, 2, 1, 1);
-        // Try to place at (10,9) — the lookahead detects that (11,9) would become
-        // unplaceable due to conflicting polarity requirements from its neighbors
-        vm.expectRevert(abi.encodeWithSelector(TruchetNFT.PolarityDeadCell.selector, uint16(11), uint16(9)));
         _placeETH(alice, 10, 9, 2, 2, 1, 2);
+        assertEq(nft.totalSupply(), 3);
     }
 
     // ── ERC-721 basics ──────────────────────────────────────
@@ -438,16 +522,17 @@ contract TruchetNFTTest is Test {
     }
 
     function test_balanceOf() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
-        assertEq(nft.balanceOf(alice), 1);
-        nft.seedTile(alice, 50, 50, 2, 2, 2, true, 1);
+        // Seed 1×2 block: 2 tiles
+        _seed2(alice, 10, 10,
+            2, 2, 2, true, 0,
+            2, 2, 2, true, 1);
         assertEq(nft.balanceOf(alice), 2);
     }
 
     // ── Transfers ────────────────────────────────────────────
 
     function test_transfer() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 tokenId = nft.tokenIdOf(10, 10);
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
@@ -457,7 +542,7 @@ contract TruchetNFTTest is Test {
     }
 
     function test_transfer_notAuthorized() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 tokenId = nft.tokenIdOf(10, 10);
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(TruchetNFT.NotAuthorized.selector, bob, tokenId));
@@ -465,7 +550,7 @@ contract TruchetNFTTest is Test {
     }
 
     function test_approve_and_transfer() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 tokenId = nft.tokenIdOf(10, 10);
         vm.prank(alice);
         nft.approve(bob, tokenId);
@@ -476,7 +561,7 @@ contract TruchetNFTTest is Test {
     }
 
     function test_setApprovalForAll() public {
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 tokenId = nft.tokenIdOf(10, 10);
         vm.prank(alice);
         nft.setApprovalForAll(bob, true);
@@ -488,7 +573,7 @@ contract TruchetNFTTest is Test {
 
     function test_safeTransferFrom() public {
         Receiver recv = new Receiver();
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 tokenId = nft.tokenIdOf(10, 10);
         vm.prank(alice);
         nft.safeTransferFrom(alice, address(recv), tokenId);
@@ -497,7 +582,7 @@ contract TruchetNFTTest is Test {
 
     function test_safeTransferFrom_badReceiver() public {
         BadReceiver recv = new BadReceiver();
-        nft.seedTile(alice, 10, 10, 2, 2, 2, true, 0);
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 tokenId = nft.tokenIdOf(10, 10);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(TruchetNFT.UnsafeRecipient.selector, address(recv)));
@@ -527,18 +612,104 @@ contract TruchetNFTTest is Test {
         assertEq(nft.gate(), alice);
     }
 
+    // ── isCatalanUsed ─────────────────────────────────────────
+
+    function test_isCatalanUsed_false() public view {
+        assertFalse(nft.isCatalanUsed(2, 2, 2, 0));
+    }
+
+    function test_isCatalanUsed_afterSeed() public {
+        _seed(alice, 10, 10, 3, 2, 1, true, 0);
+        assertTrue(nft.isCatalanUsed(3, 2, 1, 0));
+        assertFalse(nft.isCatalanUsed(3, 2, 1, 1));
+    }
+
+    function test_isCatalanUsed_afterPlace() public {
+        _seed(alice, 10, 10, 2, 2, 2, true, 0);
+        assertFalse(nft.isCatalanUsed(2, 2, 2, 1));
+        _placeETH(alice, 11, 10, 2, 2, 2, 1);
+        assertTrue(nft.isCatalanUsed(2, 2, 2, 1));
+    }
+
+    // ── readOccupancy ─────────────────────────────────────────
+
+    function test_readOccupancy_empty() public view {
+        // No tiles placed — all bits should be 0
+        uint256 packed = 1; // count=1, index=0
+        uint256[] memory words = nft.readOccupancy(packed);
+        assertEq(words.length, 1);
+        assertEq(words[0], 0);
+    }
+
+    function test_readOccupancy_singleTile() public {
+        // Seed tile at (10, 20). tokenId = (10 << 9) | 20 = 5140
+        // Repacked word index = 5140 >> 8 = 20, bit = 5140 & 255 = 20
+        _seed(alice, 10, 20, 3, 2, 1, true, 0);
+
+        uint256 packed = 1 | (20 << 8); // count=1, index=20
+        uint256[] memory words = nft.readOccupancy(packed);
+        assertEq(words.length, 1);
+        // Bit 20 should be set
+        assertTrue(words[0] & (1 << 20) != 0, "bit 20 should be set");
+        // Clear bit 20, rest should be 0
+        assertEq(words[0] & ~uint256(1 << 20), 0, "no other bits should be set");
+    }
+
+    function test_readOccupancy_multipleTiles() public {
+        // Seed 2x2 block at (10,10): tiles at (10,10), (10,11), (11,10), (11,11)
+        uint8[] memory kas = new uint8[](4);
+        uint8[] memory kbs = new uint8[](4);
+        uint8[] memory kcs = new uint8[](4);
+        uint128[] memory idxs = new uint128[](4);
+        for (uint256 j = 0; j < 4; j++) {
+            kas[j] = 2; kbs[j] = 2; kcs[j] = 2; idxs[j] = uint128(j);
+        }
+        nft.seedTiles(alice, 10, 10, 2, 2, kas, kbs, kcs, idxs, 0xF);
+
+        // (10,10): tokenId = (10<<9)|10 = 5130, wordIdx=20, bit=10
+        // (10,11): tokenId = (10<<9)|11 = 5131, wordIdx=20, bit=11
+        // (11,10): tokenId = (11<<9)|10 = 5642, wordIdx=22, bit=10
+        // (11,11): tokenId = (11<<9)|11 = 5643, wordIdx=22, bit=11
+        uint256 packed = 2 | (20 << 8) | (22 << 18); // count=2, indices 20 and 22
+        uint256[] memory words = nft.readOccupancy(packed);
+        assertEq(words.length, 2);
+
+        // Word 0 (index 20): bits 10 and 11 set
+        assertTrue(words[0] & (1 << 10) != 0, "word0 bit 10");
+        assertTrue(words[0] & (1 << 11) != 0, "word0 bit 11");
+        assertEq(words[0] & ~uint256(3 << 10), 0, "word0 no other bits");
+
+        // Word 1 (index 22): bits 10 and 11 set
+        assertTrue(words[1] & (1 << 10) != 0, "word1 bit 10");
+        assertTrue(words[1] & (1 << 11) != 0, "word1 bit 11");
+        assertEq(words[1] & ~uint256(3 << 10), 0, "word1 no other bits");
+    }
+
+    function test_readOccupancy_clampCount() public view {
+        // Count > 24 gets clamped
+        uint256 packed = 30; // count=30, but clamped to 24
+        uint256[] memory words = nft.readOccupancy(packed);
+        assertEq(words.length, 24);
+    }
+
+    function test_readOccupancy_wrongIndex_noMatch() public {
+        _seed(alice, 10, 20, 3, 2, 1, true, 0);
+        // Query index 0 — tile is at index 20, so this should be empty
+        uint256 packed = 1; // count=1, index=0
+        uint256[] memory words = nft.readOccupancy(packed);
+        assertEq(words[0], 0);
+    }
+
     // ── Edge cases ──────────────────────────────────────────
 
     function test_placeTile_epCount_1() public {
-        nft.seedTile(alice, 10, 10, 2, 1, 1, true, 0);
-        // ka=2 matching, kb and kc free as long as sum delta <= 2
+        _seed(alice, 10, 10, 2, 1, 1, true, 0);
         _placeETH(alice, 11, 10, 2, 1, 1, 1);
         assertEq(nft.totalSupply(), 2);
     }
 
     function test_placeTile_epCount_varied() public {
-        nft.seedTile(alice, 10, 10, 4, 2, 2, true, 0);
-        // Place at (11,10) with matching ka=4
+        _seed(alice, 10, 10, 4, 2, 2, true, 0);
         _placeETH(alice, 11, 10, 4, 2, 2, 1);
         assertEq(nft.totalSupply(), 2);
     }
