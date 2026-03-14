@@ -4,59 +4,56 @@
  */
 
 import {
-  SEL_PRICE_ETH, SEL_PRICE_USDC, SEL_PLACE_TILE_ETH, SEL_PLACE_TILE_USDC,
-  SEL_GET_TILE, SEL_IS_CATALAN_USED, SEL_READ_OCCUPANCY,
   encode, encodeUint, encodeAddress,
   splitWords, decodeUint, decodeBool, decodeAddress,
+  decodeCustomError, invertSelectors,
 } from './abi'
-import { GATE_ADDRESS, NFT_ADDRESS, RPC_URL } from './config'
+import { GATE_ADDRESS, NFT_ADDRESS } from './config'
+import { callRpc, simulateTx, rpc } from './ethrpc'
 import { getRawProvider, getAddress } from './wallet'
 
-/** Selector → human-readable name for debug logging. */
-const SEL_NAMES: Record<string, string> = {
-  [SEL_PRICE_ETH]: 'priceETH',
-  [SEL_PRICE_USDC]: 'priceUSDC',
-  [SEL_GET_TILE]: 'getTile',
-  [SEL_IS_CATALAN_USED]: 'isCatalanUsed',
-  [SEL_READ_OCCUPANCY]: 'readOccupancy',
-  [SEL_PLACE_TILE_ETH]: 'placeTileETH',
-  [SEL_PLACE_TILE_USDC]: 'placeTileUSDC',
+export { callRpc, waitForReceipt } from './ethrpc'
+
+// ── Selectors (name → 4-byte hex) ──
+// Generated via: cast sig "functionName(types)"
+
+export const SEL = {
+  balanceOf:      '0x70a08231',
+  priceETH:       '0xc38ad273',
+  priceUSDC:      '0x998ef386',
+  placeTileETH:   '0xb289fc6e',
+  placeTileUSDC:  '0xc222c110',
+  getTile:        '0x25181bd2',
+  isCatalanUsed:  '0x704a9bfe',
+  readOccupancy:  '0xfcb69665',
+} as const
+
+/** Selector hex → name (derived from SEL for debug logging). */
+const SEL_NAME = invertSelectors(SEL)
+
+// ── Custom revert errors (selector → name) ──
+
+const ERRORS: Record<string, string> = {
+  '0x865c2fad': 'EpSumDeltaTooLarge',
+  '0x551385bf': 'PolarityDeadCell',
+  '0xa4ddfa22': 'PolarityConflict',
+  '0xd97f185c': 'EdgeMismatch',
+  '0xc315f899': 'CatalanIndexUsed',
+  '0x485bce14': 'NotAdjacent',
+  '0x0a2a4387': 'CellOccupied',
+  '0x041cca20': 'InvalidEpCount',
 }
 
-/** Make an eth_call using wallet provider if available, else direct RPC fetch. */
-export async function callRpc(to: string, data: string): Promise<string> {
+function debugCall(data: string, label?: string) {
   const sel = data.slice(0, 10)
-  const name = SEL_NAMES[sel] ?? sel
-  console.debug(`eth_call ${name}`, data)
-
-  const provider = getRawProvider()
-  if (provider) {
-    let block = 'latest'
-    try {
-      block = await provider.request({ method: 'eth_blockNumber' }) as string
-    } catch { /* fallback */ }
-    return await provider.request({
-      method: 'eth_call',
-      params: [{ to, data }, block],
-    }) as string
-  }
-  if (!RPC_URL) throw new Error('No wallet and no RPC_URL configured')
-  const res = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'eth_call',
-      params: [{ to, data }, 'latest'],
-    }),
-  })
-  const json = await res.json()
-  if (json.error) throw new Error(json.error.message ?? 'RPC error')
-  return json.result as string
+  const name = (SEL_NAME as Record<string, string>)[sel] ?? sel
+  console.debug(`${label ?? 'eth_call'} ${name}`, data)
 }
 
 export async function fetchPriceETH(): Promise<bigint> {
   if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
-  const resultHex = await callRpc(GATE_ADDRESS, SEL_PRICE_ETH)
+  debugCall(SEL.priceETH)
+  const resultHex = await callRpc(GATE_ADDRESS, SEL.priceETH)
   const price = decodeUint(splitWords(resultHex)[0])
   console.log('fetchPriceETH:', price)
   return price
@@ -75,7 +72,8 @@ const zeroAddr = '0x' + '0'.repeat(40)
 
 export async function fetchTile(q: number, r: number): Promise<OnChainTile> {
   if (!NFT_ADDRESS) throw new Error('NFT_ADDRESS not configured')
-  const calldata = encode(SEL_GET_TILE, encodeUint(q), encodeUint(r))
+  const calldata = encode(SEL.getTile, encodeUint(q), encodeUint(r))
+  debugCall(calldata)
   const resultHex = await callRpc(NFT_ADDRESS, calldata)
   const w = splitWords(resultHex)
   const tile = {
@@ -97,7 +95,8 @@ export function tokenIdOf(q: number, r: number): bigint {
 
 export async function fetchPriceUSDC(): Promise<bigint> {
   if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
-  const resultHex = await callRpc(GATE_ADDRESS, SEL_PRICE_USDC)
+  debugCall(SEL.priceUSDC)
+  const resultHex = await callRpc(GATE_ADDRESS, SEL.priceUSDC)
   const price = decodeUint(splitWords(resultHex)[0])
   console.log('fetchPriceUSDC:', price)
   return price
@@ -105,59 +104,23 @@ export async function fetchPriceUSDC(): Promise<bigint> {
 
 export async function isCatalanUsed(ka: number, kb: number, kc: number, idx: bigint): Promise<boolean> {
   if (!NFT_ADDRESS) throw new Error('NFT_ADDRESS not configured')
-  const calldata = encode(SEL_IS_CATALAN_USED, encodeUint(ka), encodeUint(kb), encodeUint(kc), encodeUint(idx))
+  const calldata = encode(SEL.isCatalanUsed, encodeUint(ka), encodeUint(kb), encodeUint(kc), encodeUint(idx))
+  debugCall(calldata)
   const resultHex = await callRpc(NFT_ADDRESS, calldata)
   const used = decodeBool(splitWords(resultHex)[0])
   console.log(`isCatalanUsed(${ka},${kb},${kc},${idx}):`, used)
   return used
 }
 
-/** Map custom error selectors to human-readable names. */
-const ERROR_NAMES: Record<string, string> = {
-  '0x865c2fad': 'EpSumDeltaTooLarge',
-  '0x551385bf': 'PolarityDeadCell',
-  '0xa4ddfa22': 'PolarityConflict',
-  '0xd97f185c': 'EdgeMismatch',
-  '0xc315f899': 'CatalanIndexUsed',
-  '0x485bce14': 'NotAdjacent',
-  '0x0a2a4387': 'CellOccupied',
-  '0x041cca20': 'InvalidEpCount',
-}
-
-/** Try to decode a custom error selector from an error message or data. */
-function decodeCustomError(msg: string): string {
-  const match = msg.match(/0x([0-9a-f]{8})/i)
-  if (match) {
-    const sel = '0x' + match[1].toLowerCase()
-    const name = ERROR_NAMES[sel]
-    if (name) return name
-  }
-  return msg
-}
-
-/** Simulate a transaction via eth_call before sending. Throws with revert reason on failure. */
-async function simulateTx(params: Record<string, string>): Promise<void> {
+/** Simulate then send a transaction. Returns the tx hash. */
+async function sendTx(txParams: Record<string, string>): Promise<string> {
   const provider = getRawProvider()
-  if (!provider) return
-  const sel = params.data?.slice(0, 10) ?? '??'
-  const name = SEL_NAMES[sel] ?? sel
-  console.log(`simulateTx ${name}`)
-  console.debug(`simulateTx ${name}`, params.data)
-  let block = 'latest'
-  try {
-    block = await provider.request({ method: 'eth_blockNumber' }) as string
-  } catch { /* fallback */ }
-  try {
-    await provider.request({ method: 'eth_call', params: [params, block] })
-  } catch (err: unknown) {
-    if (typeof err === 'object' && err !== null) {
-      const obj = err as Record<string, unknown>
-      const data = obj.data as Record<string, unknown> | undefined
-      const rawMsg = (data?.message ?? obj.message) as string | undefined
-      if (rawMsg) throw new Error(decodeCustomError(rawMsg))
-    }
-    throw err
-  }
+  if (!provider) throw new Error('No wallet connected')
+
+  debugCall(txParams.data, 'simulateTx')
+  await simulateTx(txParams, msg => decodeCustomError(msg, ERRORS))
+
+  return await rpc<string>(provider, 'eth_sendTransaction', [txParams])
 }
 
 export async function placeTileETH(
@@ -168,37 +131,19 @@ export async function placeTileETH(
   kc: number,
   catalanIndex: bigint
 ): Promise<string> {
-  const provider = getRawProvider()
-  if (!provider) throw new Error('No wallet connected')
   if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
-
   const from = getAddress()
   if (!from) throw new Error('No account selected')
 
   const price = await fetchPriceETH()
   const calldata = encode(
-    SEL_PLACE_TILE_ETH,
+    SEL.placeTileETH,
     encodeUint(q), encodeUint(r),
     encodeUint(ka), encodeUint(kb), encodeUint(kc),
     encodeUint(catalanIndex),
   )
 
-  const txParams = {
-    from,
-    to: GATE_ADDRESS,
-    data: calldata,
-    value: '0x' + price.toString(16),
-  }
-
-  // Simulate first to get a readable revert reason
-  await simulateTx(txParams)
-
-  const txHash = await provider.request({
-    method: 'eth_sendTransaction',
-    params: [txParams],
-  }) as string
-
-  return txHash
+  return sendTx({ from, to: GATE_ADDRESS, data: calldata, value: '0x' + price.toString(16) })
 }
 
 export async function placeTileUSDC(
@@ -216,12 +161,10 @@ export async function placeTileUSDC(
   authR: string,
   authS: string,
 ): Promise<string> {
-  const provider = getRawProvider()
-  if (!provider) throw new Error('No wallet connected')
   if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
 
   const calldata = encode(
-    SEL_PLACE_TILE_USDC,
+    SEL.placeTileUSDC,
     encodeAddress(from),
     encodeUint(q), encodeUint(r),
     encodeUint(ka), encodeUint(kb), encodeUint(kc),
@@ -234,36 +177,7 @@ export async function placeTileUSDC(
     authS.replace('0x', '').padStart(64, '0'),
   )
 
-  const txParams = { from, to: GATE_ADDRESS, data: calldata }
-
-  await simulateTx(txParams)
-
-  const txHash = await provider.request({
-    method: 'eth_sendTransaction',
-    params: [txParams],
-  }) as string
-
-  return txHash
-}
-
-export async function waitForReceipt(txHash: string, timeoutMs = 60_000): Promise<{ status: boolean }> {
-  const provider = getRawProvider()
-  if (!provider) throw new Error('No wallet connected')
-
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    const receipt = await provider.request({
-      method: 'eth_getTransactionReceipt',
-      params: [txHash],
-    }) as { status: string } | null
-
-    if (receipt) {
-      return { status: receipt.status === '0x1' }
-    }
-
-    await new Promise(r => setTimeout(r, 2000))
-  }
-  throw new Error('Transaction receipt timeout')
+  return sendTx({ from, to: GATE_ADDRESS, data: calldata })
 }
 
 /**
@@ -285,7 +199,7 @@ export async function readOccupancyWords(indices: number[]): Promise<Map<number,
     for (let i = 0; i < chunk.length; i++) {
       packed |= BigInt(chunk[i] & 0x3FF) << BigInt(8 + 10 * i)
     }
-    const calldata = encode(SEL_READ_OCCUPANCY, encodeUint(packed))
+    const calldata = encode(SEL.readOccupancy, encodeUint(packed))
     const resultHex = await callRpc(NFT_ADDRESS, calldata)
     // ABI decode: offset (32 bytes) + length (32 bytes) + N words
     const words = splitWords(resultHex)

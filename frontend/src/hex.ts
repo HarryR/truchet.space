@@ -14,8 +14,14 @@
  * Neighbor across edge i has facing edge (i+3)%6.
  */
 
-export const GRID_SIZE = 512
-export const MASK = 511
+import { GRID_SIZE } from './config'
+
+export const MASK = GRID_SIZE - 1
+
+/** Wrap a coordinate to the torus [0, 511]. Handles negatives. */
+export function wrap(v: number): number {
+  return ((v % GRID_SIZE) + GRID_SIZE) & MASK
+}
 
 /** Grid coordinate. */
 export interface Hex {
@@ -73,7 +79,7 @@ export function pixelToHex(layout: HexLayout, px: number, py: number): Hex {
   const r = (py - yOffset) / layout.rowStep
   const rRound = Math.round(r)
 
-  return { q: ((qRound % GRID_SIZE) + GRID_SIZE) % GRID_SIZE, r: ((rRound % GRID_SIZE) + GRID_SIZE) % GRID_SIZE }
+  return { q: wrap(qRound), r: wrap(rRound) }
 }
 
 /**
@@ -135,7 +141,7 @@ export function neighbor(q: number, r: number, edge: number): Hex {
     case 5: nq = q + 1;    nr = even ? r + MASK : r;      break
     default: throw new Error(`invalid edge: ${edge}`)
   }
-  return { q: nq & MASK, r: nr & MASK }
+  return { q: wrap(nq), r: wrap(nr) }
 }
 
 /** All 6 neighbors of (q, r). */

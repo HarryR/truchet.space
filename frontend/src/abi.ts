@@ -5,23 +5,6 @@
  * All function selectors are precomputed constants.
  */
 
-// ── Precomputed 4-byte selectors ──
-// keccak256("balanceOf(address)")            = 0x70a08231
-// keccak256("priceETH()")                    = 0xf35e4a6e
-// keccak256("placeTileETH(uint32,uint32,uint8,uint8,uint8,uint128)") = see below
-// keccak256("getTile(uint32,uint32)")        = see below
-//
-// Generated once via: cast sig "functionName(types)"
-
-export const SEL_BALANCE_OF = '0x70a08231'
-export const SEL_PRICE_ETH = '0xc38ad273'
-export const SEL_PRICE_USDC = '0x998ef386'
-export const SEL_PLACE_TILE_ETH = '0xb289fc6e'
-export const SEL_PLACE_TILE_USDC = '0xc222c110'
-export const SEL_GET_TILE = '0x25181bd2'
-export const SEL_IS_CATALAN_USED = '0x704a9bfe'
-export const SEL_READ_OCCUPANCY = '0xfcb69665'
-
 // ── Encoding helpers ──
 
 /** Left-pad a hex string (no 0x prefix) to 64 chars (32 bytes). */
@@ -69,6 +52,32 @@ export function splitWords(hex: string): string[] {
     words.push(clean.slice(i, i + 64))
   }
   return words
+}
+
+// ── Error decoding ──
+
+/** Try to decode a custom error selector from an error message, using the provided lookup. */
+export function decodeCustomError(msg: string, errors: Record<string, string>): string {
+  const match = msg.match(/0x([0-9a-f]{8})/i)
+  if (match) {
+    const sel = '0x' + match[1].toLowerCase()
+    const name = errors[sel]
+    if (name) return name
+  }
+  return msg
+}
+
+// ── Selector helpers ──
+
+/** Invert a name→selector map to selector→name (for debug logging). */
+export function invertSelectors<T extends Record<string, string>>(
+  selectors: T
+): { [S in T[keyof T]]: { [K in keyof T]: T[K] extends S ? K : never }[keyof T] } {
+  const inv = {} as Record<string, string>
+  for (const [name, sel] of Object.entries(selectors)) {
+    inv[sel] = name
+  }
+  return inv as ReturnType<typeof invertSelectors<T>>
 }
 
 // ── Value formatting ──

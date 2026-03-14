@@ -90,4 +90,7 @@ echo "  Tile CDN:  http://localhost:8100"
 echo "  Webhook:   http://localhost:8200/webhook"
 echo "  Anvil:     http://localhost:8545"
 echo ""
-cd frontend && pnpm dev
+# Toggle between dev (HMR, unminified) and preview (production build):
+cd frontend
+#pnpm dev
+pnpm build && pnpm preview

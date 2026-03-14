@@ -4,6 +4,7 @@
 
 import { USDC_ADDRESS, GATE_ADDRESS, TARGET_CHAIN_ID } from './config'
 import { getRawProvider, getAddress } from './wallet'
+import { rpc } from './ethrpc'
 
 export interface UsdcAuthParams {
   from: string
@@ -72,10 +73,7 @@ export async function signUsdcAuthorization(value: bigint): Promise<UsdcAuthPara
     },
   }
 
-  const sig = await provider.request({
-    method: 'eth_signTypedData_v4',
-    params: [from, JSON.stringify(typedData)],
-  }) as string
+  const sig = await rpc<string>(provider, 'eth_signTypedData_v4', [from, JSON.stringify(typedData)])
 
   // Split signature: r = bytes 0-32, s = bytes 32-64, v = byte 64
   const raw = sig.replace('0x', '')

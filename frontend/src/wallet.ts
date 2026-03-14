@@ -5,15 +5,18 @@
 
 import { type EIP1193Provider, startDiscovery, getProvider, getProviders } from './eip6963'
 import {
-  SEL_BALANCE_OF, encode, encodeAddress,
+  encode, encodeAddress,
   splitWords, decodeUint, formatEther, formatUnits,
 } from './abi'
+import { SEL } from './contracts'
+import { rpc, callRpc, providerBlock, parseChainId, fetchChainId, requestAccounts, getAccounts } from './ethrpc'
 import {
   TARGET_CHAIN_ID,
   TARGET_CHAIN_ID_HEX,
   CHAIN_NAMES,
-  RPC_URL,
+  RPC_URLS,
   USDC_ADDRESS,
+  nativeCurrency,
 } from './config'
 
 export { TARGET_CHAIN_ID, TARGET_CHAIN_ID_HEX }
@@ -89,7 +92,7 @@ function handleAccountsChanged(accounts: unknown) {
 }
 
 function handleChainChanged(chainIdHex: unknown) {
-  chainId = parseInt(chainIdHex as string, 16)
+  chainId = parseChainId(chainIdHex as string)
   fetchBalances()
   notify()
 }
@@ -116,17 +119,16 @@ export async function connect(rdns?: string): Promise<boolean> {
   const provider = getProvider(rdns)
   if (!provider) throw new Error('No wallet provider found')
 
-  const accounts = await provider.request({ method: 'eth_requestAccounts' }) as string[]
+  const accounts = await requestAccounts(provider)
   if (accounts.length === 0) throw new Error('No accounts available')
 
   // eth_accounts returns all permitted accounts, not just the selected one
-  const allAccounts = await provider.request({ method: 'eth_accounts' }) as string[]
-  const hex = await provider.request({ method: 'eth_chainId' }) as string
+  const allAccounts = await getAccounts(provider)
+  chainId = await fetchChainId(provider)
 
   if (currentProvider) removeListeners(currentProvider)
   currentProvider = provider
-  address = accounts[0]
-  chainId = parseInt(hex, 16)
+  address = accounts[0]  
   activeRdns = rdns ?? findRdns(provider)
   if (activeRdns) accountsByRdns.set(activeRdns, allAccounts.length > 0 ? allAccounts : accounts)
   setupListeners(provider)
@@ -167,17 +169,9 @@ async function fetchBalances() {
   if (!currentProvider || !address) return
   const addr = address
 
-  // Use eth_blockNumber as cache-buster (MetaMask caches 'latest' aggressively)
-  let block = 'latest'
   try {
-    block = await currentProvider.request({ method: 'eth_blockNumber' }) as string
-  } catch { /* fall back to 'latest' */ }
-
-  try {
-    const ethHex = await currentProvider.request({
-      method: 'eth_getBalance',
-      params: [addr, block],
-    }) as string
+    const block = await providerBlock()
+    const ethHex = await rpc<string>(currentProvider, 'eth_getBalance', [addr, block])
     if (address !== addr) return
     ethBalance = formatEther(BigInt(ethHex))
   } catch {
@@ -185,14 +179,10 @@ async function fetchBalances() {
   }
 
   try {
-    const calldata = encode(SEL_BALANCE_OF, encodeAddress(addr))
-    const resultHex = await currentProvider.request({
-      method: 'eth_call',
-      params: [{ to: USDC_ADDRESS, data: calldata }, block],
-    }) as string
+    const calldata = encode(SEL.balanceOf, encodeAddress(addr))
+    const resultHex = await callRpc(USDC_ADDRESS, calldata)
     if (address !== addr) return
-    const words = splitWords(resultHex)
-    usdcBalance = formatUnits(decodeUint(words[0]), 6)
+    usdcBalance = formatUnits(decodeUint(splitWords(resultHex)[0]), 6)
   } catch {
     usdcBalance = null
   }
@@ -205,13 +195,12 @@ export async function checkExisting(): Promise<boolean> {
     const provider = getProvider()
     if (!provider) return false
 
-    const accounts = await provider.request({ method: 'eth_accounts' }) as string[]
+    const accounts = await getAccounts(provider)
     if (accounts.length === 0) return false
 
-    const hex = await provider.request({ method: 'eth_chainId' }) as string
+    chainId = await fetchChainId(provider)
     currentProvider = provider
-    address = accounts[0]
-    chainId = parseInt(hex, 16)
+    address = accounts[0]    
     activeRdns = findRdns(provider)
     if (activeRdns) accountsByRdns.set(activeRdns, accounts)
     setupListeners(provider)
@@ -225,23 +214,16 @@ export async function checkExisting(): Promise<boolean> {
 
 async function addChain(chainIdHex: string): Promise<boolean> {
   if (!currentProvider) return false
-  // 31337 is registered as "GoChain Testnet" on chainlist.org — MetaMask validates against this.
-  const chainId = parseInt(chainIdHex, 16)
-  const name = chainId === 31337 ? 'GoChain Testnet' : (CHAIN_NAMES[chainId] ?? `Chain ${chainIdHex}`)
-  const rpcUrl = RPC_URL || (chainIdHex === '0x7a69' ? 'http://127.0.0.1:8545' : '')
-  if (!rpcUrl) return false
+  const id = parseChainId(chainIdHex)
+  const name = CHAIN_NAMES[id] ?? `Chain ${chainIdHex}`
+  if (!RPC_URLS[0]) return false
   try {
-    await currentProvider.request({
-      method: 'wallet_addEthereumChain',
-      params: [{
-        chainId: chainIdHex,
-        chainName: name,
-        nativeCurrency: chainId === 31337
-          ? { name: 'GoChain Ether', symbol: 'GO', decimals: 18 }
-          : { name: 'Ether', symbol: 'ETH', decimals: 18 },
-        rpcUrls: [rpcUrl],
-      }],
-    })
+    await rpc(currentProvider, 'wallet_addEthereumChain', [{
+      chainId: chainIdHex,
+      chainName: name,
+      nativeCurrency: nativeCurrency(id),
+      rpcUrls: [RPC_URLS[0]],
+    }])
     return true
   } catch {
     return false
@@ -251,10 +233,7 @@ async function addChain(chainIdHex: string): Promise<boolean> {
 export async function switchChain(chainIdHex: string): Promise<boolean> {
   if (!currentProvider) return false
   try {
-    await currentProvider.request({
-      method: 'wallet_switchEthereumChain',
-      params: [{ chainId: chainIdHex }],
-    })
+    await rpc(currentProvider, 'wallet_switchEthereumChain', [{ chainId: chainIdHex }])
     return true
   } catch (err: unknown) {
     // 4902 = chain not added to wallet yet — try adding it

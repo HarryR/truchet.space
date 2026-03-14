@@ -2,6 +2,7 @@
  * Top menu bar — logo + wallet connect button + wallet dialog.
  */
 
+import { el_div, el_button, field } from './html'
 import {
   getAddress,
   isConnected,
@@ -90,60 +91,55 @@ export function initMenu() {
     const providers = getProviders()
     const activeRdns = getActiveRdns()
 
-    let html = `<button class="panel-close" aria-label="Close">&times;</button>`
+    let html = el_button( 'panel-close', '&times;', ' aria-label="Close"')
 
     if (addr) {
-      html += `<div class="panel-title" title="${addr}">${mediumAddr(addr)}</div>`
+      html += el_div( 'panel-title', mediumAddr(addr), ` title="${addr}"`)
 
       const cid = getChainId()
       const chainName = getChainName(cid)
       const onCorrectChain = isCorrectChain()
       const wrongClass = onCorrectChain ? '' : ' wrong-network'
-      html += `<div class="wallet-network panel-section${wrongClass}">`
-      html += `<span>${chainName}</span>`
+      let networkContent = `<span>${chainName}</span>`
       if (!onCorrectChain) {
-        html += `<button class="wallet-switch-chain">Switch to ${getChainName(TARGET_CHAIN_ID)}</button>`
+        networkContent += el_button( 'wallet-switch-chain', `Switch to ${getChainName(TARGET_CHAIN_ID)}`)
       }
-      html += `</div>`
+      html += el_div( `wallet-network panel-section${wrongClass}`, networkContent)
 
-      html += `<div class="wallet-balances panel-section">`
-      html += `<div class="panel-field"><span class="panel-label">ETH</span><span class="panel-value">${eth !== null ? truncateBalance(eth) : '—'}</span></div>`
-      html += `<div class="panel-field"><span class="panel-label">USDC</span><span class="panel-value">${usdc !== null ? truncateBalance(usdc, 2) : '—'}</span></div>`
-      html += `</div>`
+      html += el_div( 'wallet-balances panel-section',
+        field('ETH', eth !== null ? truncateBalance(eth) : '—') +
+        field('USDC', usdc !== null ? truncateBalance(usdc, 2) : '—'))
     }
 
     if (providers.length > 0) {
-      html += `<div class="wallet-providers">`
+      let providersHtml = ''
       for (const p of providers) {
         const isActiveProvider = p.info.rdns === activeRdns
         const providerClass = isActiveProvider ? ' active' : ''
-        html += `<div class="wallet-provider-group">`
-        html += `<button class="wallet-provider${providerClass}" data-rdns="${p.info.rdns}">`
-        html += `<img class="wallet-provider-icon" src="${p.info.icon}" alt="" width="24" height="24" />`
-        html += `<span>${p.info.name}</span>`
-        html += `</button>`
+        let groupHtml = el_button( `wallet-provider${providerClass}`,
+          `<img class="wallet-provider-icon" src="${p.info.icon}" alt="" width="24" height="24" />` +
+          `<span>${p.info.name}</span>`,
+          ` data-rdns="${p.info.rdns}"`)
 
         // Show accounts for this provider if it's the active one
         const accounts = getAccountsForProvider(p.info.rdns)
         if (isActiveProvider && accounts.length > 0) {
-          html += `<div class="wallet-accounts">`
+          let accountsHtml = ''
           for (const acct of accounts) {
             const isActive = acct.toLowerCase() === addr?.toLowerCase()
             const acctClass = isActive ? ' active' : ''
-            html += `<button class="wallet-account${acctClass}" data-address="${acct}" title="${acct}">`
-            html += mediumAddr(acct)
-            html += `</button>`
+            accountsHtml += el_button( `wallet-account${acctClass}`, mediumAddr(acct), ` data-address="${acct}" title="${acct}"`)
           }
-          html += `</div>`
+          groupHtml += el_div( 'wallet-accounts', accountsHtml)
         }
 
-        html += `</div>`
+        providersHtml += el_div( 'wallet-provider-group', groupHtml)
       }
-      html += `</div>`
+      html += el_div( 'wallet-providers', providersHtml)
     }
 
     if (addr) {
-      html += `<button class="wallet-disconnect">Disconnect</button>`
+      html += el_button( 'wallet-disconnect', 'Disconnect')
     }
 
     dialog.innerHTML = html
@@ -161,9 +157,9 @@ export function initMenu() {
       disconnect()
       closeDialog()
     })
-    for (const el of dialog.querySelectorAll('.wallet-provider')) {
-      el.addEventListener('click', async () => {
-        const rdns = (el as HTMLElement).dataset.rdns
+    for (const btn of dialog.querySelectorAll('.wallet-provider')) {
+      btn.addEventListener('click', async () => {
+        const rdns = (btn as HTMLElement).dataset.rdns
         try {
           await connect(rdns)
         } catch (e) {
@@ -171,9 +167,9 @@ export function initMenu() {
         }
       })
     }
-    for (const el of dialog.querySelectorAll('.wallet-account')) {
-      el.addEventListener('click', () => {
-        const acctAddr = (el as HTMLElement).dataset.address
+    for (const btn of dialog.querySelectorAll('.wallet-account')) {
+      btn.addEventListener('click', () => {
+        const acctAddr = (btn as HTMLElement).dataset.address
         if (acctAddr) selectAccount(acctAddr)
       })
     }

@@ -2,8 +2,8 @@
  * Auto-pick valid (ka, kb, kc, catalanIndex) for an empty cell based on neighbor constraints.
  */
 
-import { fetchTile, isCatalanUsed, type OnChainTile } from './contracts'
-import { neighbor } from './hex'
+import { EP_SUM_MIN, EP_SUM_MAX, CATALAN_PICK_ATTEMPTS } from './config'
+import { isCatalanUsed } from './contracts'
 
 /** Catalan numbers C(0)..C(30) — more than enough for any realistic EP sum. */
 const CATALAN: bigint[] = [1n]
@@ -37,11 +37,14 @@ export interface TileParams {
   catalanIndex: bigint
 }
 
+/** Minimal tile shape needed for constraint analysis — satisfied by both TileData and OnChainTile. */
+interface TileEps { ka: number; kb: number; kc: number }
+
 /**
  * Pure constraint analysis from pre-fetched neighbor data.
- * neighbors[edge] is the on-chain tile across that edge, or null if empty/unfetched.
+ * neighbors[edge] is a tile with ka/kb/kc across that edge, or null if empty/unfetched.
  */
-export function computeConstraintsFromNeighbors(nbTiles: (OnChainTile | null)[]): TileConstraints {
+export function computeConstraintsFromNeighbors(nbTiles: (TileEps | null)[]): TileConstraints {
   const fixed: [number, number, number] = [0, 0, 0]
   const freeAxes = new Set([0, 1, 2])
 
@@ -81,27 +84,6 @@ export function computeConstraintsFromNeighbors(nbTiles: (OnChainTile | null)[])
   return { fixed, freeAxes, defaults, neighborFreeSums }
 }
 
-const ZERO_ADDR = '0x' + '0'.repeat(40)
-
-/**
- * Analyze neighbor constraints for an empty cell by fetching neighbor tiles from RPC.
- */
-export async function computeConstraints(q: number, r: number): Promise<TileConstraints> {
-  const nbTiles: (OnChainTile | null)[] = []
-  for (let edge = 0; edge < 6; edge++) {
-    const { q: nq, r: nr } = neighbor(q, r, edge)
-    let tile: OnChainTile
-    try {
-      tile = await fetchTile(nq, nr)
-    } catch {
-      nbTiles[edge] = null
-      continue
-    }
-    nbTiles[edge] = tile.tileOwner !== ZERO_ADDR ? tile : null
-  }
-  return computeConstraintsFromNeighbors(nbTiles)
-}
-
 /**
  * Compute the valid range for a single free axis given current EP values and neighbor sums.
  * Takes into account the EP sum delta ≤ 2 constraint across ALL neighbors simultaneously.
@@ -113,12 +95,16 @@ export function axisRange(
 ): [number, number] {
   if (!constraints.freeAxes.has(axis)) return [currentEps[axis], currentEps[axis]]
 
+  let otherSum = 0
+  for (let a = 0; a < 3; a++) {
+    if (a !== axis) otherSum += currentEps[a]
+  }
   let otherFreeSum = 0
   for (const a of constraints.freeAxes) {
     if (a !== axis) otherFreeSum += currentEps[a]
   }
-  let lo = 1
-  let hi = 20
+  let lo = Math.max(1, EP_SUM_MIN - otherSum)
+  let hi = EP_SUM_MAX - otherSum
   for (const nbFreeSum of constraints.neighborFreeSums) {
     lo = Math.max(lo, nbFreeSum - 2 - otherFreeSum)
     hi = Math.min(hi, nbFreeSum + 2 - otherFreeSum)
@@ -158,7 +144,7 @@ export async function pickCatalanIndex(ka: number, kb: number, kc: number): Prom
     }
   }
 
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < CATALAN_PICK_ATTEMPTS; attempt++) {
     const idx = BigInt(Math.floor(Math.random() * Number(maxIdx < 1000000n ? maxIdx : 1000000n)))
     if (!(await checkUsed(idx))) return idx
   }
