@@ -12,25 +12,54 @@ import {
 import { GATE_ADDRESS, NFT_ADDRESS, RPC_URL } from './config'
 import { getRawProvider, getAddress } from './wallet'
 
-/** Get latest block number as hex — used as cache-buster for eth_call. */
-async function latestBlock(): Promise<string> {
+/** Selector → human-readable name for debug logging. */
+const SEL_NAMES: Record<string, string> = {
+  [SEL_PRICE_ETH]: 'priceETH',
+  [SEL_PRICE_USDC]: 'priceUSDC',
+  [SEL_GET_TILE]: 'getTile',
+  [SEL_IS_CATALAN_USED]: 'isCatalanUsed',
+  [SEL_READ_OCCUPANCY]: 'readOccupancy',
+  [SEL_PLACE_TILE_ETH]: 'placeTileETH',
+  [SEL_PLACE_TILE_USDC]: 'placeTileUSDC',
+}
+
+/** Make an eth_call using wallet provider if available, else direct RPC fetch. */
+export async function callRpc(to: string, data: string): Promise<string> {
+  const sel = data.slice(0, 10)
+  const name = SEL_NAMES[sel] ?? sel
+  console.debug(`eth_call ${name}`, data)
+
   const provider = getRawProvider()
-  if (!provider) return 'latest'
-  const hex = await provider.request({ method: 'eth_blockNumber' }) as string
-  return hex
+  if (provider) {
+    let block = 'latest'
+    try {
+      block = await provider.request({ method: 'eth_blockNumber' }) as string
+    } catch { /* fallback */ }
+    return await provider.request({
+      method: 'eth_call',
+      params: [{ to, data }, block],
+    }) as string
+  }
+  if (!RPC_URL) throw new Error('No wallet and no RPC_URL configured')
+  const res = await fetch(RPC_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'eth_call',
+      params: [{ to, data }, 'latest'],
+    }),
+  })
+  const json = await res.json()
+  if (json.error) throw new Error(json.error.message ?? 'RPC error')
+  return json.result as string
 }
 
 export async function fetchPriceETH(): Promise<bigint> {
-  const provider = getRawProvider()
-  if (!provider) throw new Error('No wallet connected')
   if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
-
-  const block = await latestBlock()
-  const resultHex = await provider.request({
-    method: 'eth_call',
-    params: [{ to: GATE_ADDRESS, data: SEL_PRICE_ETH }, block],
-  }) as string
-  return decodeUint(splitWords(resultHex)[0])
+  const resultHex = await callRpc(GATE_ADDRESS, SEL_PRICE_ETH)
+  const price = decodeUint(splitWords(resultHex)[0])
+  console.log('fetchPriceETH:', price)
+  return price
 }
 
 export interface OnChainTile {
@@ -42,17 +71,12 @@ export interface OnChainTile {
   tileOwner: string
 }
 
-export async function fetchTile(q: number, r: number): Promise<OnChainTile> {
-  const provider = getRawProvider()
-  if (!provider) throw new Error('No wallet connected')
-  if (!NFT_ADDRESS) throw new Error('NFT_ADDRESS not configured')
+const zeroAddr = '0x' + '0'.repeat(40)
 
-  const block = await latestBlock()
+export async function fetchTile(q: number, r: number): Promise<OnChainTile> {
+  if (!NFT_ADDRESS) throw new Error('NFT_ADDRESS not configured')
   const calldata = encode(SEL_GET_TILE, encodeUint(q), encodeUint(r))
-  const resultHex = await provider.request({
-    method: 'eth_call',
-    params: [{ to: NFT_ADDRESS, data: calldata }, block],
-  }) as string
+  const resultHex = await callRpc(NFT_ADDRESS, calldata)
   const w = splitWords(resultHex)
   const tile = {
     ka: Number(decodeUint(w[0])),
@@ -62,7 +86,7 @@ export async function fetchTile(q: number, r: number): Promise<OnChainTile> {
     catalanIndex: decodeUint(w[4]),
     tileOwner: decodeAddress(w[5]),
   }
-  console.log(`fetchTile(${q},${r}) block=${block}:`, tile.tileOwner === '0x' + '0'.repeat(40) ? 'empty' : tile)
+  console.debug(`fetchTile(${q},${r}):`, tile.tileOwner === zeroAddr ? 'empty' : tile)
   return tile
 }
 
@@ -72,30 +96,20 @@ export function tokenIdOf(q: number, r: number): bigint {
 }
 
 export async function fetchPriceUSDC(): Promise<bigint> {
-  const provider = getRawProvider()
-  if (!provider) throw new Error('No wallet connected')
   if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
-
-  const block = await latestBlock()
-  const resultHex = await provider.request({
-    method: 'eth_call',
-    params: [{ to: GATE_ADDRESS, data: SEL_PRICE_USDC }, block],
-  }) as string
-  return decodeUint(splitWords(resultHex)[0])
+  const resultHex = await callRpc(GATE_ADDRESS, SEL_PRICE_USDC)
+  const price = decodeUint(splitWords(resultHex)[0])
+  console.log('fetchPriceUSDC:', price)
+  return price
 }
 
 export async function isCatalanUsed(ka: number, kb: number, kc: number, idx: bigint): Promise<boolean> {
-  const provider = getRawProvider()
-  if (!provider) throw new Error('No wallet connected')
   if (!NFT_ADDRESS) throw new Error('NFT_ADDRESS not configured')
-
-  const block = await latestBlock()
   const calldata = encode(SEL_IS_CATALAN_USED, encodeUint(ka), encodeUint(kb), encodeUint(kc), encodeUint(idx))
-  const resultHex = await provider.request({
-    method: 'eth_call',
-    params: [{ to: NFT_ADDRESS, data: calldata }, block],
-  }) as string
-  return decodeBool(splitWords(resultHex)[0])
+  const resultHex = await callRpc(NFT_ADDRESS, calldata)
+  const used = decodeBool(splitWords(resultHex)[0])
+  console.log(`isCatalanUsed(${ka},${kb},${kc},${idx}):`, used)
+  return used
 }
 
 /** Map custom error selectors to human-readable names. */
@@ -125,7 +139,14 @@ function decodeCustomError(msg: string): string {
 async function simulateTx(params: Record<string, string>): Promise<void> {
   const provider = getRawProvider()
   if (!provider) return
-  const block = await latestBlock()
+  const sel = params.data?.slice(0, 10) ?? '??'
+  const name = SEL_NAMES[sel] ?? sel
+  console.log(`simulateTx ${name}`)
+  console.debug(`simulateTx ${name}`, params.data)
+  let block = 'latest'
+  try {
+    block = await provider.request({ method: 'eth_blockNumber' }) as string
+  } catch { /* fallback */ }
   try {
     await provider.request({ method: 'eth_call', params: [params, block] })
   } catch (err: unknown) {
@@ -245,33 +266,6 @@ export async function waitForReceipt(txHash: string, timeoutMs = 60_000): Promis
   throw new Error('Transaction receipt timeout')
 }
 
-/** Make an eth_call using wallet provider if available, else direct RPC fetch. */
-export async function callRpc(to: string, data: string): Promise<string> {
-  const provider = getRawProvider()
-  if (provider) {
-    let block = 'latest'
-    try {
-      block = await provider.request({ method: 'eth_blockNumber' }) as string
-    } catch { /* fallback */ }
-    return await provider.request({
-      method: 'eth_call',
-      params: [{ to, data }, block],
-    }) as string
-  }
-  if (!RPC_URL) throw new Error('No wallet and no RPC_URL configured')
-  const res = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'eth_call',
-      params: [{ to, data }, 'latest'],
-    }),
-  })
-  const json = await res.json()
-  if (json.error) throw new Error(json.error.message ?? 'RPC error')
-  return json.result as string
-}
-
 /**
  * Batch-read repacked occupancy words from the contract.
  * @param indices Array of repacked word indices (0-1023), max 24 per call.
@@ -281,6 +275,8 @@ export async function readOccupancyWords(indices: number[]): Promise<Map<number,
   if (!NFT_ADDRESS) throw new Error('NFT_ADDRESS not configured')
   const result = new Map<number, bigint>()
   if (indices.length === 0) return result
+
+  console.log(`readOccupancyWords: ${indices.length} words`)
 
   // Process in chunks of 24
   for (let offset = 0; offset < indices.length; offset += 24) {

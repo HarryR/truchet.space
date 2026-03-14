@@ -642,17 +642,20 @@ contract TruchetNFTTest is Test {
     }
 
     function test_readOccupancy_singleTile() public {
-        // Seed tile at (10, 20). tokenId = (10 << 9) | 20 = 5140
-        // Repacked word index = 5140 >> 8 = 20, bit = 5140 & 255 = 20
+        // Seed tile at (10, 20).
+        // Block index = (10>>4)<<5 | (20>>4) = 0<<5 | 1 = 1
+        // sub = ((10&15)>>3)<<1 | ((20&15)>>3) = 1<<1|0 = 2
+        // cell = ((10&7)<<3) | (20&7) = 16|4 = 20
+        // bit = (2<<6)|20 = 148
         _seed(alice, 10, 20, 3, 2, 1, true, 0);
 
-        uint256 packed = 1 | (20 << 8); // count=1, index=20
+        uint256 packed = 1 | (1 << 8); // count=1, block index=1
         uint256[] memory words = nft.readOccupancy(packed);
         assertEq(words.length, 1);
-        // Bit 20 should be set
-        assertTrue(words[0] & (1 << 20) != 0, "bit 20 should be set");
-        // Clear bit 20, rest should be 0
-        assertEq(words[0] & ~uint256(1 << 20), 0, "no other bits should be set");
+        // Bit 148 should be set
+        assertTrue(words[0] & (1 << 148) != 0, "bit 148 should be set");
+        // Clear bit 148, rest should be 0
+        assertEq(words[0] & ~(uint256(1) << 148), 0, "no other bits should be set");
     }
 
     function test_readOccupancy_multipleTiles() public {
@@ -666,23 +669,22 @@ contract TruchetNFTTest is Test {
         }
         nft.seedTiles(alice, 10, 10, 2, 2, kas, kbs, kcs, idxs, 0xF);
 
-        // (10,10): tokenId = (10<<9)|10 = 5130, wordIdx=20, bit=10
-        // (10,11): tokenId = (10<<9)|11 = 5131, wordIdx=20, bit=11
-        // (11,10): tokenId = (11<<9)|10 = 5642, wordIdx=22, bit=10
-        // (11,11): tokenId = (11<<9)|11 = 5643, wordIdx=22, bit=11
-        uint256 packed = 2 | (20 << 8) | (22 << 18); // count=2, indices 20 and 22
+        // All 4 tiles are in block 0 (q=0..15, r=0..15):
+        // (10,10): sub=3, cell=(2<<3)|2=18, bit=192+18=210
+        // (10,11): sub=3, cell=(2<<3)|3=19, bit=192+19=211
+        // (11,10): sub=3, cell=(3<<3)|2=26, bit=192+26=218
+        // (11,11): sub=3, cell=(3<<3)|3=27, bit=192+27=219
+        uint256 packed = 1 | (0 << 8); // count=1, block index=0
         uint256[] memory words = nft.readOccupancy(packed);
-        assertEq(words.length, 2);
+        assertEq(words.length, 1);
 
-        // Word 0 (index 20): bits 10 and 11 set
-        assertTrue(words[0] & (1 << 10) != 0, "word0 bit 10");
-        assertTrue(words[0] & (1 << 11) != 0, "word0 bit 11");
-        assertEq(words[0] & ~uint256(3 << 10), 0, "word0 no other bits");
-
-        // Word 1 (index 22): bits 10 and 11 set
-        assertTrue(words[1] & (1 << 10) != 0, "word1 bit 10");
-        assertTrue(words[1] & (1 << 11) != 0, "word1 bit 11");
-        assertEq(words[1] & ~uint256(3 << 10), 0, "word1 no other bits");
+        assertTrue(words[0] & (uint256(1) << 210) != 0, "bit 210 (10,10)");
+        assertTrue(words[0] & (uint256(1) << 211) != 0, "bit 211 (10,11)");
+        assertTrue(words[0] & (uint256(1) << 218) != 0, "bit 218 (11,10)");
+        assertTrue(words[0] & (uint256(1) << 219) != 0, "bit 219 (11,11)");
+        // Clear those 4 bits, rest should be 0
+        uint256 mask = (uint256(1) << 210) | (uint256(1) << 211) | (uint256(1) << 218) | (uint256(1) << 219);
+        assertEq(words[0] & ~mask, 0, "no other bits");
     }
 
     function test_readOccupancy_clampCount() public view {
@@ -694,8 +696,8 @@ contract TruchetNFTTest is Test {
 
     function test_readOccupancy_wrongIndex_noMatch() public {
         _seed(alice, 10, 20, 3, 2, 1, true, 0);
-        // Query index 0 — tile is at index 20, so this should be empty
-        uint256 packed = 1; // count=1, index=0
+        // Tile is at block index 1 — query block 2, should be empty
+        uint256 packed = 1 | (2 << 8); // count=1, block index=2
         uint256[] memory words = nft.readOccupancy(packed);
         assertEq(words[0], 0);
     }

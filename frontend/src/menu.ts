@@ -57,7 +57,7 @@ export function initMenu() {
   document.body.appendChild(overlay)
 
   const dialog = document.createElement('div')
-  dialog.className = 'wallet-dialog'
+  dialog.className = 'wallet-dialog panel'
   overlay.appendChild(dialog)
 
   let dialogOpen = false
@@ -90,47 +90,47 @@ export function initMenu() {
     const providers = getProviders()
     const activeRdns = getActiveRdns()
 
-    let html = `<button class="wallet-dialog-close" aria-label="Close">&times;</button>`
+    let html = `<button class="panel-close" aria-label="Close">&times;</button>`
 
     if (addr) {
-      html += `<div class="wallet-dialog-addr" title="${addr}">${mediumAddr(addr)}</div>`
+      html += `<div class="panel-title" title="${addr}">${mediumAddr(addr)}</div>`
 
       const cid = getChainId()
       const chainName = getChainName(cid)
       const onCorrectChain = isCorrectChain()
       const wrongClass = onCorrectChain ? '' : ' wrong-network'
-      html += `<div class="wallet-dialog-network${wrongClass}">`
+      html += `<div class="wallet-network panel-section${wrongClass}">`
       html += `<span>${chainName}</span>`
       if (!onCorrectChain) {
-        html += `<button class="wallet-dialog-switch-chain">Switch to ${getChainName(TARGET_CHAIN_ID)}</button>`
+        html += `<button class="wallet-switch-chain">Switch to ${getChainName(TARGET_CHAIN_ID)}</button>`
       }
       html += `</div>`
 
-      html += `<div class="wallet-dialog-balances">`
-      html += `<div class="wallet-dialog-balance"><span class="balance-label">ETH</span><span class="balance-value">${eth !== null ? truncateBalance(eth) : '—'}</span></div>`
-      html += `<div class="wallet-dialog-balance"><span class="balance-label">USDC</span><span class="balance-value">${usdc !== null ? truncateBalance(usdc, 2) : '—'}</span></div>`
+      html += `<div class="wallet-balances panel-section">`
+      html += `<div class="panel-field"><span class="panel-label">ETH</span><span class="panel-value">${eth !== null ? truncateBalance(eth) : '—'}</span></div>`
+      html += `<div class="panel-field"><span class="panel-label">USDC</span><span class="panel-value">${usdc !== null ? truncateBalance(usdc, 2) : '—'}</span></div>`
       html += `</div>`
     }
 
     if (providers.length > 0) {
-      html += `<div class="wallet-dialog-providers">`
+      html += `<div class="wallet-providers">`
       for (const p of providers) {
         const isActiveProvider = p.info.rdns === activeRdns
         const providerClass = isActiveProvider ? ' active' : ''
-        html += `<div class="wallet-dialog-provider-group">`
-        html += `<button class="wallet-dialog-provider${providerClass}" data-rdns="${p.info.rdns}">`
-        html += `<img class="wallet-dialog-provider-icon" src="${p.info.icon}" alt="" width="24" height="24" />`
+        html += `<div class="wallet-provider-group">`
+        html += `<button class="wallet-provider${providerClass}" data-rdns="${p.info.rdns}">`
+        html += `<img class="wallet-provider-icon" src="${p.info.icon}" alt="" width="24" height="24" />`
         html += `<span>${p.info.name}</span>`
         html += `</button>`
 
         // Show accounts for this provider if it's the active one
         const accounts = getAccountsForProvider(p.info.rdns)
         if (isActiveProvider && accounts.length > 0) {
-          html += `<div class="wallet-dialog-accounts">`
+          html += `<div class="wallet-accounts">`
           for (const acct of accounts) {
             const isActive = acct.toLowerCase() === addr?.toLowerCase()
             const acctClass = isActive ? ' active' : ''
-            html += `<button class="wallet-dialog-account${acctClass}" data-address="${acct}" title="${acct}">`
+            html += `<button class="wallet-account${acctClass}" data-address="${acct}" title="${acct}">`
             html += mediumAddr(acct)
             html += `</button>`
           }
@@ -143,25 +143,25 @@ export function initMenu() {
     }
 
     if (addr) {
-      html += `<button class="wallet-dialog-disconnect">Disconnect</button>`
+      html += `<button class="wallet-disconnect">Disconnect</button>`
     }
 
     dialog.innerHTML = html
 
     // Bind events
-    dialog.querySelector('.wallet-dialog-close')?.addEventListener('click', closeDialog)
-    dialog.querySelector('.wallet-dialog-switch-chain')?.addEventListener('click', async () => {
+    dialog.querySelector('.panel-close')?.addEventListener('click', closeDialog)
+    dialog.querySelector('.wallet-switch-chain')?.addEventListener('click', async () => {
       try {
         await ensureCorrectChain()
       } catch (e) {
         console.error('Chain switch failed:', e)
       }
     })
-    dialog.querySelector('.wallet-dialog-disconnect')?.addEventListener('click', () => {
+    dialog.querySelector('.wallet-disconnect')?.addEventListener('click', () => {
       disconnect()
       closeDialog()
     })
-    for (const el of dialog.querySelectorAll('.wallet-dialog-provider')) {
+    for (const el of dialog.querySelectorAll('.wallet-provider')) {
       el.addEventListener('click', async () => {
         const rdns = (el as HTMLElement).dataset.rdns
         try {
@@ -171,7 +171,7 @@ export function initMenu() {
         }
       })
     }
-    for (const el of dialog.querySelectorAll('.wallet-dialog-account')) {
+    for (const el of dialog.querySelectorAll('.wallet-account')) {
       el.addEventListener('click', () => {
         const acctAddr = (el as HTMLElement).dataset.address
         if (acctAddr) selectAccount(acctAddr)

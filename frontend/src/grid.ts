@@ -7,7 +7,7 @@
  * 3. Constraint layer — mark unplaceable frontier cells as dead.
  */
 
-import { TILE_CDN } from './config'
+import { TILE_CDN, FRONTIER_STALE_MS } from './config'
 import { readOccupancyWords } from './contracts'
 import { computeConstraints } from './tileParams'
 import { GRID_SIZE, MASK, neighbors } from './hex'
@@ -27,19 +27,35 @@ export interface TileData {
 /** Repacked occupancy words: wordIndex (0-1023) → 256-bit occupancy. */
 const occCache = new Map<number, bigint>()
 
-/** Frontier watch set: repacked word indices containing unresolved frontier cells. */
-const frontierWords = new Set<number>()
+/**
+ * Frontier: word indices adjacent to occupied words.
+ * Maps word index → timestamp of last fetch (0 = never fetched).
+ * Only re-fetched after FRONTIER_STALE_MS has elapsed.
+ */
+const frontierWords = new Map<number, number>()
 
-function tokenId(q: number, r: number): number {
-  return ((q & MASK) << 9) | (r & MASK)
+/** Word indices that contain occupied cells. Tracks last-fetch time for re-polling. */
+const occupiedWords = new Map<number, number>()
+
+/** Block index for a cell: 16×16 blocks, 1024 total. */
+function blockIndex(q: number, r: number): number {
+  return (((q & MASK) >> 4) << 5) | ((r & MASK) >> 4)
+}
+
+/** Bit position within a block's 256-bit word. */
+function blockBit(q: number, r: number): number {
+  const lq = q & 15
+  const lr = r & 15
+  const sub = ((lq >> 3) << 1) | (lr >> 3) // which 8×8 sub-block (0-3)
+  const cell = ((lq & 7) << 3) | (lr & 7)  // cell within sub-block (0-63)
+  return (sub << 6) | cell
 }
 
 /** Check if a cell is occupied (placed tile or marked dead). */
 export function isOccupied(q: number, r: number): boolean {
-  const id = tokenId(q, r)
-  const wordIndex = id >> 8
-  const bit = id & 255
-  const word = occCache.get(wordIndex)
+  const wi = blockIndex(q, r)
+  const bit = blockBit(q, r)
+  const word = occCache.get(wi)
   if (word === undefined) return false
   return (word & (1n << BigInt(bit))) !== 0n
 }
@@ -51,76 +67,105 @@ export function isPlaced(q: number, r: number): boolean {
 
 /** Mark a cell as dead (unplaceable) in the local occupancy cache. */
 export function markDead(q: number, r: number) {
-  const id = tokenId(q, r)
-  const wordIndex = id >> 8
-  const bit = id & 255
-  const word = occCache.get(wordIndex) ?? 0n
-  occCache.set(wordIndex, word | (1n << BigInt(bit)))
+  const wi = blockIndex(q, r)
+  const bit = blockBit(q, r)
+  const word = occCache.get(wi) ?? 0n
+  occCache.set(wi, word | (1n << BigInt(bit)))
 }
 
 /** Set a cell as occupied in the local cache (e.g. after minting). */
 export function markOccupied(q: number, r: number) {
-  const id = tokenId(q, r)
-  const wordIndex = id >> 8
-  const bit = id & 255
-  const word = occCache.get(wordIndex) ?? 0n
-  occCache.set(wordIndex, word | (1n << BigInt(bit)))
+  const wi = blockIndex(q, r)
+  const bit = blockBit(q, r)
+  const word = occCache.get(wi) ?? 0n
+  occCache.set(wi, word | (1n << BigInt(bit)))
+  occupiedWords.set(wi, Date.now())
 }
 
 // ── Frontier tracking ──
 
-function updateFrontier(wordIndices: Iterable<number>) {
+/**
+ * After fetching words, scan occupied cells for neighbors in unfetched words.
+ * Those unfetched neighbor words become the new frontier.
+ */
+function expandFrontier(wordIndices: Iterable<number>) {
+  const now = Date.now()
   for (const wi of wordIndices) {
     const word = occCache.get(wi) ?? 0n
-    if (word === 0n) continue
-
-    let hasFrontier = false
-    // Scan placed cells in this word, check their neighbors
-    const base = wi << 8
-    for (let bit = 0; bit < 256; bit++) {
-      if ((word & (1n << BigInt(bit))) === 0n) continue
-      const id = base + bit
-      const q = (id >> 9) & MASK
-      const r = id & MASK
-      for (const { q: nq, r: nr } of neighbors(q, r)) {
-        if (!isOccupied(nq, nr)) {
-          const nWordIndex = tokenId(nq, nr) >> 8
-          frontierWords.add(nWordIndex)
-          hasFrontier = true
+    if (word !== 0n) {
+      occupiedWords.set(wi, now)
+      // Scan occupied cells, add neighbor blocks we haven't fetched to frontier
+      const bq = wi >> 5
+      const br = wi & 31
+      for (let bit = 0; bit < 256; bit++) {
+        if ((word & (1n << BigInt(bit))) === 0n) continue
+        const sub = bit >> 6
+        const cell = bit & 63
+        const lq = ((sub >> 1) << 3) | (cell >> 3)
+        const lr = ((sub & 1) << 3) | (cell & 7)
+        const q = ((bq << 4) | lq) & MASK
+        const r = ((br << 4) | lr) & MASK
+        for (const { q: nq, r: nr } of neighbors(q, r)) {
+          const nwi = blockIndex(nq, nr)
+          if (!occCache.has(nwi) && !frontierWords.has(nwi)) {
+            frontierWords.set(nwi, 0) // 0 = never fetched
+          }
         }
       }
     }
-    if (!hasFrontier) {
-      frontierWords.delete(wi)
-    }
+    // This word is fetched, record the time
+    frontierWords.set(wi, now)
   }
 }
 
 let refreshInProgress = false
 
+/** Word indices visible in the current viewport. */
+let viewportWords = new Set<number>()
+
+/** Compute the set of block indices covering a viewport range. */
+function viewportWordIndices(qMin: number, qMax: number, rMin: number, rMax: number): Set<number> {
+  const words = new Set<number>()
+  for (let q = qMin; q <= qMax; q++) {
+    const wq = ((q % GRID_SIZE) + GRID_SIZE) & MASK
+    for (let r = rMin; r <= rMax; r++) {
+      const wr = ((r % GRID_SIZE) + GRID_SIZE) & MASK
+      words.add(blockIndex(wq, wr))
+    }
+  }
+  return words
+}
+
 /**
- * Fetch occupancy bitmap for the visible viewport range.
- * Debounce externally — this just does the work.
+ * Explore occupancy by expanding from known tiles into the viewport.
+ *
+ * On first call, seeds from a small region around origin. After that,
+ * only fetches frontier words (adjacent to occupied, not yet fetched)
+ * that are visible in the current viewport.
  */
 export async function refreshBitmap(qMin: number, qMax: number, rMin: number, rMax: number) {
   if (refreshInProgress) return
   refreshInProgress = true
   try {
-    // Compute repacked word indices for visible cells
-    const needed = new Set<number>()
-    for (let q = qMin; q <= qMax; q++) {
-      const wq = ((q % GRID_SIZE) + GRID_SIZE) & MASK
-      for (let r = rMin; r <= rMax; r++) {
-        const wr = ((r % GRID_SIZE) + GRID_SIZE) & MASK
-        const id = (wq << 9) | wr
-        needed.add(id >> 8)
+    viewportWords = viewportWordIndices(qMin, qMax, rMin, rMax)
+
+    // Bootstrap: block 0 covers q=0..15, r=0..15 — contains the 5×5 seed
+    if (occCache.size === 0) {
+      const result = await readOccupancyWords([0])
+      for (const [wi, word] of result) {
+        occCache.set(wi, word)
       }
+      expandFrontier([0])
+      scheduleRedraw()
     }
 
-    // Filter out already-cached words
+    // Fetch frontier words that are visible and haven't been fetched recently
+    const now = Date.now()
     const toFetch: number[] = []
-    for (const wi of needed) {
-      if (!occCache.has(wi)) toFetch.push(wi)
+    for (const [wi, lastFetched] of frontierWords) {
+      if (viewportWords.has(wi) && now - lastFetched >= FRONTIER_STALE_MS) {
+        toFetch.push(wi)
+      }
     }
 
     if (toFetch.length > 0) {
@@ -128,7 +173,7 @@ export async function refreshBitmap(qMin: number, qMax: number, rMin: number, rM
       for (const [wi, word] of result) {
         occCache.set(wi, word)
       }
-      updateFrontier(toFetch)
+      expandFrontier(toFetch)
       scheduleRedraw()
     }
   } catch (err) {
@@ -138,12 +183,29 @@ export async function refreshBitmap(qMin: number, qMax: number, rMin: number, rM
   }
 }
 
-/** Re-fetch frontier words from chain. Call periodically. */
+/**
+ * Re-poll occupied words in the viewport to detect new placements.
+ * Call periodically (only when wallet connected).
+ */
 export async function refreshFrontier() {
-  if (frontierWords.size === 0) return
-  const indices = [...frontierWords]
+  const now = Date.now()
+  const indices: number[] = []
+  // Re-fetch occupied words in viewport that are stale
+  for (const [wi, lastFetched] of occupiedWords) {
+    if (viewportWords.has(wi) && now - lastFetched >= FRONTIER_STALE_MS) {
+      indices.push(wi)
+    }
+  }
+  // Also fetch stale frontier words in viewport
+  for (const [wi, lastFetched] of frontierWords) {
+    if (viewportWords.has(wi) && now - lastFetched >= FRONTIER_STALE_MS) {
+      indices.push(wi)
+    }
+  }
+  if (indices.length === 0) return
   try {
     const result = await readOccupancyWords(indices)
+    const fetchedAt = Date.now()
     let changed = false
     for (const [wi, word] of result) {
       const old = occCache.get(wi) ?? 0n
@@ -151,9 +213,12 @@ export async function refreshFrontier() {
         occCache.set(wi, word)
         changed = true
       }
+      // Update timestamps regardless of change
+      if (occupiedWords.has(wi)) occupiedWords.set(wi, fetchedAt)
+      if (frontierWords.has(wi)) frontierWords.set(wi, fetchedAt)
     }
     if (changed) {
-      updateFrontier(indices)
+      expandFrontier(indices)
       scheduleRedraw()
     }
   } catch (err) {
@@ -218,8 +283,7 @@ async function drainAnalyzeQueue() {
       if (dead) {
         markDead(q, r)
         // Re-evaluate frontier
-        const wi = tokenId(q, r) >> 8
-        updateFrontier([wi])
+        expandFrontier([blockIndex(q, r)])
       }
     } catch {
       // Can't analyze yet — will retry on future viewport/frontier refresh

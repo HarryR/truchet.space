@@ -20,12 +20,17 @@ Usage:
 """
 import random
 import sys
-from itertools import combinations
+
+
+# ── Types ──────────────────────────────────────────────────────────────
+
+Family = tuple[int, int, int]
+Matching = list[tuple[int, int]]
 
 
 # ── Core simulation ────────────────────────────────────────────────────
 
-def random_ncm(points):
+def random_ncm(points: list[int]) -> Matching:
     """Generate a random non-crossing matching on a list of point indices."""
     if len(points) == 0:
         return []
@@ -39,7 +44,7 @@ def random_ncm(points):
     return [pair] + random_ncm(inside) + random_ncm(outside)
 
 
-def compute_depths(matching, total_points):
+def compute_depths(matching: Matching, total_points: int) -> list[int]:
     """Nesting depth at each segment around the perimeter.
 
     Returns list of length total_points + 1.
@@ -58,16 +63,17 @@ def compute_depths(matching, total_points):
     return depths
 
 
-def edge_starts(eps):
+def edge_starts(eps:list[int]):
     """Starting endpoint index for each of the 6 edges."""
-    s, out = 0, []
+    s = 0
+    out:list[int] = []
     for k in eps:
         out.append(s)
         s += k
     return out
 
 
-def sim_flip(family_a, matching_a, family_b, matching_b, edge_a):
+def sim_flip(family_a: Family, matching_a: Matching, family_b: Family, matching_b: Matching, edge_a: int) -> str:
     """Simulate region coloring to find polarity relationship.
 
     edge_a: edge index on tile A that faces tile B.
@@ -86,7 +92,7 @@ def sim_flip(family_a, matching_a, family_b, matching_b, edge_a):
     sb = edge_starts(eps_b)[edge_b]
     k = eps_a[edge_a]
 
-    flip_vals = set()
+    flip_vals: set[int] = set()
     for j in range(k + 1):
         da = depths_a[sa + j] % 2
         db = depths_b[sb + k - j] % 2
@@ -97,7 +103,7 @@ def sim_flip(family_a, matching_a, family_b, matching_b, edge_a):
     return 'conflict'
 
 
-def formula_flip(family_a, family_b, edge_a):
+def formula_flip(family_a: Family, family_b: Family, edge_a: int) -> str:
     """Flip formula: flipFactor(E) = sum EPs_A(0..E-1) + sum EPs_B(0..E') mod 2."""
     ka_a, kb_a, kc_a = family_a
     ka_b, kb_b, kc_b = family_b
@@ -116,19 +122,19 @@ def formula_flip(family_a, family_b, edge_a):
     return 'flip' if f else 'same'
 
 
-def make_matching(family):
+def make_matching(family: Family) -> Matching:
     total = sum(family)
     return random_ncm(list(range(2 * total)))
 
 
-def get_ep(family, axis):
+def get_ep(family: Family, axis: int) -> int:
     return family[axis]
 
 
-def set_ep(family, axis, val):
+def set_ep(family: Family, axis: int, val: int) -> Family:
     f = list(family)
     f[axis] = val
-    return tuple(f)
+    return (f[0], f[1], f[2])
 
 
 # ── Hex neighborhood geometry ─────────────────────────────────────────
@@ -145,24 +151,26 @@ def set_ep(family, axis, val):
 #     center's edge = E
 #     N_E's edge    = (E + 3) % 6
 
-NB_SHARED_AXIS = lambda e: (e + 2) % 3       # axis shared between N_e and N_{e+1}
-NB_EDGE_FWD    = lambda e: (e + 2) % 6       # N_e's edge facing N_{e+1}
-NB_EDGE_REV    = lambda e: (e + 5) % 6       # N_{e+1}'s edge facing N_e
-CENTER_AXIS    = lambda e: e % 3              # axis shared between center and N_e
+def NB_SHARED_AXIS(e: int) -> int: return (e + 2) % 3    # axis shared between N_e and N_{e+1}
+def NB_EDGE_FWD(e: int) -> int:    return (e + 2) % 6    # N_e's edge facing N_{e+1}
+def NB_EDGE_REV(e: int) -> int:    return (e + 5) % 6    # N_{e+1}'s edge facing N_e
+def CENTER_AXIS(e: int) -> int:    return e % 3           # axis shared between center and N_e
 
 
 # ── Pair mode (original) ──────────────────────────────────────────────
 
-def run_pair(n_samples, max_k):
+def run_pair(n_samples: int, max_k: int) -> None:
     n_ok = n_bad = n_conflict = 0
 
+    def rand_family() -> Family:
+        return (random.randint(1, max_k), random.randint(1, max_k), random.randint(1, max_k))
+
     for _ in range(n_samples):
-        family_a = tuple(random.randint(1, max_k) for _ in range(3))
+        family_a = rand_family()
         edge = random.randint(0, 5)
         shared_ep = family_a[edge % 3]
 
-        family_b = tuple(random.randint(1, max_k) for _ in range(3))
-        family_b = set_ep(family_b, (edge + 3) % 6 % 3, shared_ep)
+        family_b = set_ep(rand_family(), (edge + 3) % 6 % 3, shared_ep)
 
         ma = make_matching(family_a)
         mb = make_matching(family_b)
@@ -209,49 +217,46 @@ NAMED_CONFIGS = {
 }
 
 
-def generate_neighborhood(center_fam, edges, max_k, max_retries=50):
+def generate_neighborhood(center_fam: Family, edges: list[int], max_k: int, max_retries: int = 50) -> dict[int, tuple[Family, Matching, bool]] | None:
     """Generate a locally-consistent set of neighbors around a center tile.
 
     Returns dict {edge: (family, matching, polarity)} or None.
     """
     for _ in range(max_retries):
-        neighbors = {}
-
         # Generate families: shared EP with center must match,
         # shared EP between consecutive neighbors must match.
-        families = {}
+        fam_lists: dict[int, list[int]] = {}
         for e in edges:
-            families[e] = [random.randint(1, max_k) for _ in range(3)]
+            fam_lists[e] = [random.randint(1, max_k) for _ in range(3)]
             # match center's shared EP
             axis_c = CENTER_AXIS(e)
-            families[e][axis_c] = center_fam[axis_c]
+            fam_lists[e][axis_c] = center_fam[axis_c]
 
         # Enforce neighbor-neighbor EP constraints for consecutive pairs
-        ok = True
         for i, e in enumerate(edges):
             e_next = (e + 1) % 6
-            if e_next not in families:
+            if e_next not in fam_lists:
                 continue
             axis = NB_SHARED_AXIS(e)
             # Both must agree — pick one and enforce
-            val = families[e][axis]
-            if families[e_next][axis] != val:
-                families[e_next][axis] = val
+            val = fam_lists[e][axis]
+            if fam_lists[e_next][axis] != val:
+                fam_lists[e_next][axis] = val
 
         # Re-check center EP constraints weren't broken
         for e in edges:
             axis_c = CENTER_AXIS(e)
-            if families[e][axis_c] != center_fam[axis_c]:
-                families[e][axis_c] = center_fam[axis_c]
+            if fam_lists[e][axis_c] != center_fam[axis_c]:
+                fam_lists[e][axis_c] = center_fam[axis_c]
 
         # Convert to tuples, generate matchings
-        for e in edges:
-            families[e] = tuple(families[e])
-
-        matchings = {e: make_matching(families[e]) for e in edges}
+        families: dict[int, Family] = {
+            e: (f[0], f[1], f[2]) for e, f in fam_lists.items()
+        }
+        matchings: dict[int, Matching] = {e: make_matching(families[e]) for e in edges}
 
         # Assign polarity: first neighbor is True, propagate via simulation
-        polarities = {}
+        polarities: dict[int, bool] = {}
         edge_list = sorted(edges)
         polarities[edge_list[0]] = True
 
@@ -297,15 +302,18 @@ def generate_neighborhood(center_fam, edges, max_k, max_retries=50):
     return None  # couldn't generate consistent neighborhood
 
 
-def run_neighbor(n_samples, max_k):
-    stats = {
-        'consistent': 0,      # all neighbors agree on center polarity
-        'conflict': 0,         # neighbors disagree (center unplaceable)
-        'formula_ok': 0,       # formula matches simulation for all edges
-        'formula_bad': 0,      # formula disagrees with simulation
-        'gen_fail': 0,         # couldn't generate valid neighborhood
-        'by_config': {},       # per-configuration stats
-    }
+CfgStats = dict[str, int]
+
+def run_neighbor(n_samples: int, max_k: int) -> None:
+    consistent = 0
+    conflict = 0
+    formula_ok = 0
+    formula_bad = 0
+    gen_fail = 0
+    by_config: dict[str, CfgStats] = {}
+
+    def rand_family() -> Family:
+        return (random.randint(1, max_k), random.randint(1, max_k), random.randint(1, max_k))
 
     for _ in range(n_samples):
         # Random or named configuration
@@ -315,25 +323,25 @@ def run_neighbor(n_samples, max_k):
             edges = random_edge_set()
             name = f'random_{len(edges)}'
 
-        if name not in stats['by_config']:
-            stats['by_config'][name] = {'consistent': 0, 'conflict': 0,
-                                         'formula_ok': 0, 'formula_bad': 0,
-                                         'gen_fail': 0}
-        cfg = stats['by_config'][name]
+        if name not in by_config:
+            by_config[name] = {'consistent': 0, 'conflict': 0,
+                               'formula_ok': 0, 'formula_bad': 0,
+                               'gen_fail': 0}
+        cfg = by_config[name]
 
-        center_fam = tuple(random.randint(1, max_k) for _ in range(3))
+        center_fam = rand_family()
         center_matching = make_matching(center_fam)
 
         hood = generate_neighborhood(center_fam, edges, max_k)
         if hood is None:
-            stats['gen_fail'] += 1
+            gen_fail += 1
             cfg['gen_fail'] += 1
             continue
 
         # For each neighbor, compute required center polarity via simulation
         # and via formula
-        sim_pols = {}
-        frm_pols = {}
+        sim_pols: dict[int, bool] = {}
+        frm_pols: dict[int, bool] = {}
         any_conflict = False
 
         for e, (nb_fam, nb_match, nb_pol) in hood.items():
@@ -350,26 +358,25 @@ def run_neighbor(n_samples, max_k):
             frm_pols[e] = (not nb_pol) if rel_frm == 'flip' else nb_pol
 
         if any_conflict:
-            stats['conflict'] += 1
+            conflict += 1
             cfg['conflict'] += 1
             continue
 
         # Check consistency across all neighbors
         sim_vals = set(sim_pols.values())
-        frm_vals = set(frm_pols.values())
 
         if len(sim_vals) > 1:
-            stats['conflict'] += 1
+            conflict += 1
             cfg['conflict'] += 1
         else:
-            stats['consistent'] += 1
+            consistent += 1
             cfg['consistent'] += 1
 
             if sim_pols == frm_pols:
-                stats['formula_ok'] += 1
+                formula_ok += 1
                 cfg['formula_ok'] += 1
             else:
-                stats['formula_bad'] += 1
+                formula_bad += 1
                 cfg['formula_bad'] += 1
                 print(f"  MISMATCH: config={name} center={center_fam} "
                       f"edges={edges}")
@@ -379,14 +386,14 @@ def run_neighbor(n_samples, max_k):
                           f"frm={frm_pols[e]}")
 
     print(f"neighbor: {n_samples} samples, max_k={max_k}")
-    print(f"  consistent: {stats['consistent']}  "
-          f"(formula ok: {stats['formula_ok']}, bad: {stats['formula_bad']})")
-    print(f"  conflict (unplaceable): {stats['conflict']}")
-    print(f"  gen_fail: {stats['gen_fail']}")
+    print(f"  consistent: {consistent}  "
+          f"(formula ok: {formula_ok}, bad: {formula_bad})")
+    print(f"  conflict (unplaceable): {conflict}")
+    print(f"  gen_fail: {gen_fail}")
     print()
 
-    for name in sorted(stats['by_config']):
-        c = stats['by_config'][name]
+    for name in sorted(by_config):
+        c = by_config[name]
         total = c['consistent'] + c['conflict'] + c['gen_fail']
         if total == 0:
             continue

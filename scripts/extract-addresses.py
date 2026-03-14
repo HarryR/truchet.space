@@ -66,6 +66,10 @@ def main():
         f.write(f"VITE_NFT_ADDRESS={nft_address}\n")
         f.write(f"VITE_GATE_ADDRESS={gate_address}\n")
         f.write("VITE_CHAIN_ID=31337\n")
+        f.write("VITE_RPC_URL=http://127.0.0.1:8545\n")
+        f.write("VITE_USDC_ADDRESS=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\n")
+        f.write("VITE_BLOCK_EXPLORER=http://127.0.0.1:8545\n")
+        f.write("VITE_TILE_CDN=http://localhost:8100\n")
     print(f"Wrote {frontend_env}")
 
     # Write backend/.env

@@ -19,12 +19,13 @@ import json
 import os
 import random
 import time
+import urllib.error
 import urllib.request
 from typing import Any
 from uuid import uuid4
 
 # Reuse the existing RPC helper and topic constant
-from .server import rpc_call, TILE_PLACED_TOPIC
+from .chain import rpc_call, TILE_PLACED_TOPIC
 
 
 def wrap_alchemy(logs: list[dict[str, Any]]) -> dict[str, Any]:

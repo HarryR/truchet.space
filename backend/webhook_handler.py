@@ -15,7 +15,7 @@ import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any
 
-from .server import decode_tile_placed
+from .chain import decode_tile_placed
 from .solver import solve_tile
 
 

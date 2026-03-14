@@ -77,8 +77,9 @@ contract TruchetNFT is IERC721Metadata {
     // Grid state: packed (q,r) → tile data
     mapping(uint256 => Tile) internal _grid;
 
-    // Family uniqueness: packed (ka, kb, kc, catalanIndex) → placed
-    mapping(uint256 => bool) internal _familyCatalanUsed;
+    // Family uniqueness bitmap: packed (ka, kb, kc, catalanIndex/256) → 256-bit word.
+    // Bit (catalanIndex % 256) is set when that index is placed.
+    mapping(uint256 => uint256) internal _familyCatalanBitmap;
 
     // Polarity bitmap: 4 bits per cell, 64 cells per uint256 word.
     // Bits [3:0] = {req_c, req_b, req_a, occupied}
@@ -211,22 +212,28 @@ contract TruchetNFT is IERC721Metadata {
         return tile.kc;
     }
 
-    /// @dev Packed family uniqueness key (19 bytes, fits in uint256).
-    function _familyKey(uint8 ka, uint8 kb, uint8 kc, uint128 catalanIndex) internal pure returns (uint256) {
-        return uint256(catalanIndex) | (uint256(kc) << 128) | (uint256(kb) << 136) | (uint256(ka) << 144);
+    /// @dev Packed family bitmap word key: (ka, kb, kc, catalanIndex >> 8).
+    function _familyWordKey(uint8 ka, uint8 kb, uint8 kc, uint128 catalanIndex) internal pure returns (uint256) {
+        return (uint256(catalanIndex) >> 8) | (uint256(kc) << 120) | (uint256(kb) << 128) | (uint256(ka) << 136);
     }
 
     // ── Polarity Bitmap ────────────────────────────────────────
 
-    /// @dev Read 4-bit entry from polarity bitmap.
+    /// @dev Read 4-bit entry from polarity bitmap (8×8 square block layout).
     function _bitmapRead(uint256 tokenId) internal view returns (uint256) {
-        return (_polarityBitmap[tokenId >> 6] >> ((tokenId & 63) << 2)) & 0xF;
+        uint256 q = tokenId >> 9;
+        uint256 r = tokenId & 0x1FF;
+        uint256 wordKey = (q >> 3) << 6 | (r >> 3);
+        uint256 cellIdx = ((q & 7) << 3) | (r & 7);
+        return (_polarityBitmap[wordKey] >> (cellIdx << 2)) & 0xF;
     }
 
-    /// @dev Write 4-bit entry to polarity bitmap (read-modify-write).
+    /// @dev Write 4-bit entry to polarity bitmap (8×8 square block layout).
     function _bitmapWrite(uint256 tokenId, uint256 val4) internal {
-        uint256 wordKey = tokenId >> 6;
-        uint256 shift = (tokenId & 63) << 2;
+        uint256 q = tokenId >> 9;
+        uint256 r = tokenId & 0x1FF;
+        uint256 wordKey = (q >> 3) << 6 | (r >> 3);
+        uint256 shift = (((q & 7) << 3) | (r & 7)) << 2;
         _polarityBitmap[wordKey] =
             (_polarityBitmap[wordKey] & ~(uint256(0xF) << shift)) | (val4 << shift);
     }
@@ -263,10 +270,15 @@ contract TruchetNFT is IERC721Metadata {
         if (to == address(0)) revert ZeroAddress();
         uint256 n = uint256(width) * uint256(height);
 
-        // Bitmap word cache — accumulate bits, flush on word-key change.
+        // Polarity bitmap word cache — accumulate bits in memory, flush on word-key change.
         // Column-major iteration keeps consecutive r values together → max bitmap locality.
         uint256 cachedWordKey = type(uint256).max;
         uint256 cachedWord;
+
+        // Family-catalan bitmap cache — accumulate bits for same-family tiles in memory.
+        // Most seeds use a single family, so this avoids N-1 warm SSTOREs.
+        uint256 cachedFamKey = type(uint256).max;
+        uint256 cachedFamWord;
 
         for (uint256 col = 0; col < width; col++) {
             uint16 q = (q0 + uint16(col)) & MASK;
@@ -276,8 +288,8 @@ contract TruchetNFT is IERC721Metadata {
                 uint16 r = (r0 + uint16(row)) & MASK;
                 uint256 tokenId = (uint256(q) << 9) | uint256(r);
 
-                // Load / flush bitmap word cache
-                uint256 wordKey = tokenId >> 6;
+                // Polarity bitmap: 8×8 square block layout
+                uint256 wordKey = (uint256(q) >> 3) << 6 | (uint256(r) >> 3);
                 if (wordKey != cachedWordKey) {
                     if (cachedWordKey != type(uint256).max) {
                         _polarityBitmap[cachedWordKey] = cachedWord;
@@ -286,14 +298,23 @@ contract TruchetNFT is IERC721Metadata {
                     cachedWordKey = wordKey;
                 }
 
-                // Accumulate bitmap bits in memory
                 bool pol = (polarities >> i) & 1 == 1;
-                uint256 shift = (tokenId & 63) << 2;
+                uint256 shift = (((uint256(q) & 7) << 3) | (uint256(r) & 7)) << 2;
                 cachedWord = (cachedWord & ~(uint256(0xF) << shift))
                            | (_computeBitmapVal(ka, kb, kc, pol) << shift);
 
+                // Family-catalan bitmap: load / flush on key change
                 uint128 idx = catalanIndexes[i];
-                _familyCatalanUsed[_familyKey(ka, kb, kc, idx)] = true;
+                uint256 fWordKey = _familyWordKey(ka, kb, kc, idx);
+                if (fWordKey != cachedFamKey) {
+                    if (cachedFamKey != type(uint256).max) {
+                        _familyCatalanBitmap[cachedFamKey] = cachedFamWord;
+                    }
+                    cachedFamWord = _familyCatalanBitmap[fWordKey];
+                    cachedFamKey = fWordKey;
+                }
+                cachedFamWord = cachedFamWord | (1 << (uint256(idx) & 255));
+
                 _grid[_cellKey(q, r)] = Tile(ka, kb, kc, pol, idx);
                 _owners[tokenId] = to;
 
@@ -302,9 +323,12 @@ contract TruchetNFT is IERC721Metadata {
             }
         }
 
-        // Flush last cached bitmap word
+        // Flush cached bitmap words
         if (cachedWordKey != type(uint256).max) {
             _polarityBitmap[cachedWordKey] = cachedWord;
+        }
+        if (cachedFamKey != type(uint256).max) {
+            _familyCatalanBitmap[cachedFamKey] = cachedFamWord;
         }
 
         _balances[to] += n;
@@ -449,10 +473,11 @@ contract TruchetNFT is IERC721Metadata {
             revert NotAdjacent(q, r);
         }
 
-        // Family+catalan uniqueness
-        uint256 fKey = _familyKey(ka, kb, kc, catalanIndex);
-        if (_familyCatalanUsed[fKey]) revert CatalanIndexUsed(ka, kb, kc, catalanIndex);
-        _familyCatalanUsed[fKey] = true;
+        // Family+catalan uniqueness (bitmap: 256 indices per word)
+        uint256 fWordKey = _familyWordKey(ka, kb, kc, catalanIndex);
+        uint256 fBit = 1 << (uint256(catalanIndex) & 255);
+        if (_familyCatalanBitmap[fWordKey] & fBit != 0) revert CatalanIndexUsed(ka, kb, kc, catalanIndex);
+        _familyCatalanBitmap[fWordKey] = _familyCatalanBitmap[fWordKey] | fBit;
 
         _grid[_cellKey(q, r)] = Tile(ka, kb, kc, polarity, catalanIndex);
         _bitmapWrite(tokenId, _computeBitmapVal(ka, kb, kc, polarity));
@@ -468,8 +493,9 @@ contract TruchetNFT is IERC721Metadata {
 
     /// @notice Batch-read occupancy bitmap (1 bit per cell, 256 cells per word).
     /// @param packed  Bits [7:0] = count N (max 24).
-    ///                For i in 0..N-1: bits [8+10*i .. 17+10*i] = repacked word index (0–1023).
-    ///                Each repacked word covers 256 cells (4 source bitmap words, bit 0 extracted).
+    ///                For i in 0..N-1: bits [8+10*i .. 17+10*i] = block index (0–1023).
+    ///                Each block covers a 16×16 region (2×2 grid of 8×8 storage words).
+    ///                Block index = (bq << 5) | br, where bq,br = 0..31.
     /// @return words  The N repacked occupancy words.
     function readOccupancy(uint256 packed) external view returns (uint256[] memory words) {
         uint256 n = packed & 0xFF;
@@ -477,15 +503,18 @@ contract TruchetNFT is IERC721Metadata {
         words = new uint256[](n);
         for (uint256 i; i < n; i++) {
             uint256 idx = (packed >> (8 + 10 * i)) & 0x3FF;
-            uint256 base = idx << 2;
+            uint256 bq = idx >> 5;
+            uint256 br = idx & 31;
             uint256 packed256;
-            for (uint256 w; w < 4; w++) {
-                uint256 src = _polarityBitmap[base + w];
+            for (uint256 sub; sub < 4; sub++) {
+                uint256 sq = (bq << 1) | (sub >> 1);
+                uint256 sr = (br << 1) | (sub & 1);
+                uint256 src = _polarityBitmap[(sq << 6) | sr];
                 uint256 bits64;
                 for (uint256 c; c < 64; c++) {
                     bits64 |= ((src >> (c << 2)) & 1) << c;
                 }
-                packed256 |= bits64 << (w << 6);
+                packed256 |= bits64 << (sub << 6);
             }
             words[i] = packed256;
         }
@@ -495,7 +524,8 @@ contract TruchetNFT is IERC721Metadata {
 
     /// @notice Check whether a (family, catalanIndex) pair has been placed.
     function isCatalanUsed(uint8 ka, uint8 kb, uint8 kc, uint128 catalanIndex) public view returns (bool) {
-        return _familyCatalanUsed[_familyKey(ka, kb, kc, catalanIndex)];
+        uint256 fWordKey = _familyWordKey(ka, kb, kc, catalanIndex);
+        return _familyCatalanBitmap[fWordKey] & (1 << (uint256(catalanIndex) & 255)) != 0;
     }
 
     /// @notice Returns tile data and owner at grid position (q, r).

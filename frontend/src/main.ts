@@ -172,9 +172,9 @@ function scheduleViewportRefresh() {
   }, 200)
 }
 
-// Periodic frontier refresh (every 12 seconds)
+// Periodic frontier refresh (every 12 seconds, only when wallet connected)
 setInterval(() => {
-  refreshFrontier()
+  if (isConnected()) refreshFrontier()
 }, 12_000)
 
 // ── Interaction: pan, zoom, hover ──
@@ -249,7 +249,7 @@ canvas.addEventListener('wheel', (e) => {
 // ── Tile info panel ──
 
 const tilePanel = document.createElement('div')
-tilePanel.className = 'tile-panel'
+tilePanel.className = 'tile-panel panel'
 tilePanel.style.display = 'none'
 document.body.appendChild(tilePanel)
 
@@ -305,74 +305,78 @@ function renderMintArea(el: HTMLElement, s: MintUIState) {
 
   if (s.flowState === 'idle') {
     // EP controls
-    html += `<div class="tile-panel-ep-controls">`
+    html += `<div class="ep-controls">`
     for (let axis = 0; axis < 3; axis++) {
       const free = s.constraints.freeAxes.has(axis)
       const val = s.eps[axis]
-      html += `<div class="tile-panel-ep-row">`
-      html += `<span class="tile-panel-ep-label">${AXIS_NAMES[axis]}</span>`
+      html += `<div class="ep-row">`
+      html += `<span class="ep-label">${AXIS_NAMES[axis]}</span>`
       if (free) {
         const canDec = nextValidValue(axis, s.eps, -1, s.constraints) !== null
         const canInc = nextValidValue(axis, s.eps, 1, s.constraints) !== null
-        html += `<button class="tile-panel-ep-btn" data-axis="${axis}" data-dir="-1"${canDec ? '' : ' disabled'}>-</button>`
-        html += `<span class="tile-panel-ep-val">${val}</span>`
-        html += `<button class="tile-panel-ep-btn" data-axis="${axis}" data-dir="1"${canInc ? '' : ' disabled'}>+</button>`
+        html += `<button class="ep-btn" data-axis="${axis}" data-dir="-1"${canDec ? '' : ' disabled'}>-</button>`
+        html += `<span class="ep-val">${val}</span>`
+        html += `<button class="ep-btn" data-axis="${axis}" data-dir="1"${canInc ? '' : ' disabled'}>+</button>`
       } else {
-        html += `<span class="tile-panel-ep-val tile-panel-ep-locked">${val}</span>`
-        html += `<span class="tile-panel-ep-lock">locked</span>`
+        html += `<span class="ep-val ep-locked">${val}</span>`
+        html += `<span class="ep-lock">locked</span>`
       }
       html += `</div>`
     }
     const epSum = s.eps[0] + s.eps[1] + s.eps[2]
     const familySize = catalan(epSum)
-    html += `<div class="tile-panel-field"><span class="tile-panel-label">Family size</span><span class="tile-panel-value mono">C(${epSum}) = ${familySize.toLocaleString()}</span></div>`
+    html += `<div class="panel-field"><span class="panel-label">Family size</span><span class="panel-value mono">C(${epSum}) = ${familySize.toLocaleString()}</span></div>`
     html += `</div>`
 
     // Prices + balances
     const ethBal = getEthBalance()
     const usdcBal = getUsdcBalance()
     if (s.ethPrice !== null) {
-      html += `<div class="tile-panel-field"><span class="tile-panel-label">ETH price</span><span class="tile-panel-value mono">${formatEther(s.ethPrice)} ETH</span></div>`
+      html += `<div class="panel-field"><span class="panel-label">ETH price</span><span class="panel-value mono">${formatEther(s.ethPrice)} ETH</span></div>`
     }
     if (s.usdcPrice !== null) {
-      html += `<div class="tile-panel-field"><span class="tile-panel-label">USDC price</span><span class="tile-panel-value mono">${formatUnits(s.usdcPrice, 6)} USDC</span></div>`
+      html += `<div class="panel-field"><span class="panel-label">USDC price</span><span class="panel-value mono">${formatUnits(s.usdcPrice, 6)} USDC</span></div>`
     }
 
     // Buttons
     const connected = isConnected()
     const correctChain = isCorrectChain()
     if (!connected) {
-      html += `<button class="tile-panel-mint-btn" disabled>Connect wallet</button>`
+      html += `<button class="mint-btn" disabled>Connect wallet</button>`
     } else if (!correctChain) {
-      html += `<button class="tile-panel-mint-btn" disabled>Switch network</button>`
+      html += `<button class="mint-btn" disabled>Switch network</button>`
     } else {
       const ethDisabled = s.ethPrice !== null && ethBal !== null && parseFloat(ethBal) < parseFloat(formatEther(s.ethPrice))
       const usdcDisabled = s.usdcPrice !== null && usdcBal !== null && parseFloat(usdcBal) < parseFloat(formatUnits(s.usdcPrice, 6))
-      html += `<button class="tile-panel-mint-btn" id="mint-eth-btn"${ethDisabled ? ' disabled title="Insufficient ETH"' : ''}>Mint with ETH</button>`
-      html += `<button class="tile-panel-mint-btn" id="mint-usdc-btn"${usdcDisabled ? ' disabled title="Insufficient USDC"' : ''}>Mint with USDC</button>`
+      html += `<button class="mint-btn" id="mint-eth-btn"${ethDisabled ? ' disabled title="Insufficient ETH"' : ''}>Mint with ETH</button>`
+      html += `<button class="mint-btn" id="mint-usdc-btn"${usdcDisabled ? ' disabled title="Insufficient USDC"' : ''}>Mint with USDC</button>`
     }
   } else if (s.flowState === 'confirming') {
-    html = `<div class="tile-panel-mint-status">Confirm in wallet...</div>`
+    html = `<div class="panel-field"><span class="panel-label">Status</span><span class="panel-value">confirm in wallet</span></div>`
   } else if (s.flowState === 'pending') {
-    html = `<div class="tile-panel-mint-status">Transaction pending...</div>`
-    if (s.txHash) {
-      html += `<a class="tile-panel-tx-link" href="${BLOCK_EXPLORER}/tx/${s.txHash}" target="_blank" rel="noopener">${s.txHash.slice(0, 10)}...${s.txHash.slice(-8)}</a>`
-    }
+    const value = s.txHash
+      ? `<a class="panel-value" href="${BLOCK_EXPLORER}/tx/${s.txHash}" target="_blank" rel="noopener">minting</a>`
+      : `<span class="panel-value">minting</span>`
+    html = `<div class="panel-field"><span class="panel-label">Status</span>${value}</div>`
   } else if (s.flowState === 'confirmed') {
-    html = `<div class="tile-panel-mint-status">Minted! Generating artwork...</div>`
-    if (s.txHash) {
-      html += `<a class="tile-panel-tx-link" href="${BLOCK_EXPLORER}/tx/${s.txHash}" target="_blank" rel="noopener">${s.txHash.slice(0, 10)}...${s.txHash.slice(-8)}</a>`
-    }
+    const value = s.txHash
+      ? `<a class="panel-value" href="${BLOCK_EXPLORER}/tx/${s.txHash}" target="_blank" rel="noopener">minted</a>`
+      : `<span class="panel-value">minted</span>`
+    html = `<div class="panel-field"><span class="panel-label">Status</span>${value}</div>`
   } else if (s.flowState === 'error') {
-    html = `<div class="tile-panel-mint-status tile-panel-error">${s.errorMsg ?? 'Unknown error'}</div>`
-    html += `<button class="tile-panel-mint-btn" id="mint-retry-btn">Try again</button>`
+    html = `<div class="panel-field"><span class="panel-label">Status</span><span class="panel-value panel-error">${s.errorMsg ?? 'Unknown error'}</span></div>`
+    html += `<button class="mint-btn" id="mint-retry-btn">Try again</button>`
   }
 
   el.innerHTML = html
 
+  // Hide the on-chain "Not minted" status when mint flow shows its own status
+  const chainStatus = document.getElementById('tile-chain-status')
+  if (chainStatus) chainStatus.style.display = s.flowState === 'idle' ? '' : 'none'
+
   // Bind EP stepper buttons
   if (s.flowState === 'idle') {
-    for (const btn of el.querySelectorAll<HTMLButtonElement>('.tile-panel-ep-btn')) {
+    for (const btn of el.querySelectorAll<HTMLButtonElement>('.ep-btn')) {
       btn.addEventListener('click', () => {
         const axis = Number(btn.dataset.axis)
         const dir = Number(btn.dataset.dir) as 1 | -1
@@ -464,29 +468,29 @@ function showTilePanel(q: number, r: number) {
   const placed = isPlaced(q, r)
   const tokenId = tokenIdOf(q, r)
 
-  let html = `<button class="tile-panel-close">&times;</button>`
-  html += `<div class="tile-panel-title">Tile (${q}, ${r})</div>`
-  html += `<div class="tile-panel-field"><span class="tile-panel-label">Token ID</span><span class="tile-panel-value">${tokenId}</span></div>`
+  let html = `<button class="panel-close">&times;</button>`
+  html += `<a class="panel-title" href="#tile=${q},${r}">Tile (${q}, ${r})</a>`
+  html += `<div class="panel-field"><span class="panel-label">Token ID</span><span class="panel-value">${tokenId}</span></div>`
 
   // Metadata placeholder (filled from CDN JSON)
   html += `<div id="tile-metadata">`
   if (placed) {
     const cached = getTile(q, r)
     if (cached) {
-      html += `<div class="tile-panel-field"><span class="tile-panel-label">Family</span><span class="tile-panel-value">${cached.ka}-${cached.kb}-${cached.kc}</span></div>`
-      html += `<div class="tile-panel-field"><span class="tile-panel-label">Catalan index</span><span class="tile-panel-value">${cached.catalanIndex}</span></div>`
+      html += `<div class="panel-field"><span class="panel-label">Family</span><span class="panel-value">${cached.ka}-${cached.kb}-${cached.kc}</span></div>`
+      html += `<div class="panel-field"><span class="panel-label">Catalan index</span><span class="panel-value">${cached.catalanIndex}</span></div>`
     } else {
-      html += `<span class="tile-panel-loading">Loading metadata...</span>`
+      html += `<span class="panel-loading">Loading metadata...</span>`
     }
   } else {
-    html += `<div class="tile-panel-empty">Empty cell</div>`
+    html += `<div class="panel-empty">Empty cell</div>`
   }
   html += `</div>`
 
   // On-chain data placeholder (filled async)
-  html += `<div class="tile-panel-chain" id="tile-chain-data">`
+  html += `<div class="panel-divider" id="tile-chain-data">`
   if (isConnected() && NFT_ADDRESS) {
-    html += `<span class="tile-panel-loading">Loading on-chain data...</span>`
+    html += `<span class="panel-loading">Loading on-chain data...</span>`
   }
   html += `</div>`
 
@@ -496,13 +500,11 @@ function showTilePanel(q: number, r: number) {
   // Explorer link — only shown for minted tiles (populated async)
   html += `<div id="tile-explorer-link"></div>`
 
-  // Share link
-  html += `<a class="tile-panel-link" href="#tile=${q},${r}">Permalink</a>`
 
   tilePanel.innerHTML = html
   tilePanel.style.display = ''
 
-  tilePanel.querySelector('.tile-panel-close')?.addEventListener('click', closeTilePanel)
+  tilePanel.querySelector('.panel-close')?.addEventListener('click', closeTilePanel)
 
   // Fetch JSON metadata from CDN (if placed and not cached)
   if (placed && !getTile(q, r)) {
@@ -512,10 +514,10 @@ function showTilePanel(q: number, r: number) {
       if (!metaEl) return
       if (tile) {
         metaEl.innerHTML =
-          `<div class="tile-panel-field"><span class="tile-panel-label">Family</span><span class="tile-panel-value">${tile.ka}-${tile.kb}-${tile.kc}</span></div>` +
-          `<div class="tile-panel-field"><span class="tile-panel-label">Catalan index</span><span class="tile-panel-value">${tile.catalanIndex}</span></div>`
+          `<div class="panel-field"><span class="panel-label">Family</span><span class="panel-value">${tile.ka}-${tile.kb}-${tile.kc}</span></div>` +
+          `<div class="panel-field"><span class="panel-label">Catalan index</span><span class="panel-value">${tile.catalanIndex}</span></div>`
       } else {
-        metaEl.innerHTML = `<span class="tile-panel-error">Metadata unavailable</span>`
+        metaEl.innerHTML = `<span class="panel-error">Metadata unavailable</span>`
       }
     })
   }
@@ -540,16 +542,16 @@ function showTilePanel(q: number, r: number) {
 
       let chainHtml = ''
       if (owned) {
-        chainHtml += `<div class="tile-panel-field"><span class="tile-panel-label">Owner</span><span class="tile-panel-value mono" title="${onChain.tileOwner}">${shortAddr(onChain.tileOwner)}</span></div>`
-        chainHtml += `<div class="tile-panel-field"><span class="tile-panel-label">Polarity</span><span class="tile-panel-value">${onChain.polarity ? '+' : '-'}</span></div>`
-        chainHtml += `<div class="tile-panel-field"><span class="tile-panel-label">Family (chain)</span><span class="tile-panel-value">${onChain.ka}-${onChain.kb}-${onChain.kc}</span></div>`
+        chainHtml += `<div class="panel-field"><span class="panel-label">Owner</span><span class="panel-value mono" title="${onChain.tileOwner}">${shortAddr(onChain.tileOwner)}</span></div>`
+        chainHtml += `<div class="panel-field"><span class="panel-label">Polarity</span><span class="panel-value">${onChain.polarity ? 'positive' : 'negative'}</span></div>`
+        chainHtml += `<div class="panel-field"><span class="panel-label">Family (chain)</span><span class="panel-value">${onChain.ka}-${onChain.kb}-${onChain.kc}</span></div>`
 
         // Show explorer link only for minted tiles
         if (explorerEl) {
-          explorerEl.innerHTML = `<a class="tile-panel-explorer" href="${BLOCK_EXPLORER}/token/${NFT_ADDRESS}?a=${tokenId}" target="_blank" rel="noopener">View on explorer</a>`
+          explorerEl.innerHTML = `<a class="panel-link" href="${BLOCK_EXPLORER}/token/${NFT_ADDRESS}?a=${tokenId}" target="_blank" rel="noopener">View on explorer</a>`
         }
       } else {
-        chainHtml += `<div class="tile-panel-field"><span class="tile-panel-label">Status</span><span class="tile-panel-value">Not minted</span></div>`
+        chainHtml += `<div class="panel-field" id="tile-chain-status"><span class="panel-label">Status</span><span class="panel-value">Not minted</span></div>`
 
         // Only show mint controls if cell has at least one adjacent placed tile
         let hasAdjacentTile = false
@@ -559,7 +561,7 @@ function showTilePanel(q: number, r: number) {
         }
 
         if (mintEl && hasAdjacentTile) {
-          mintEl.innerHTML = `<div class="tile-panel-mint-status">Loading constraints...</div>`
+          mintEl.innerHTML = `<div class="panel-loading">Loading constraints...</div>`
           computeConstraints(q, r).then(constraints => {
             if (!selectedTile || selectedTile.q !== q || selectedTile.r !== r) return
             console.log(`Constraints (${q},${r}):`, {
@@ -578,14 +580,14 @@ function showTilePanel(q: number, r: number) {
             renderMintArea(mintEl, uiState)
             bindMintButtons(mintEl, uiState)
           }).catch(err => {
-            if (mintEl) mintEl.innerHTML = `<div class="tile-panel-mint-status tile-panel-error">${extractErrorMessage(err)}</div>`
+            if (mintEl) mintEl.innerHTML = `<div class="panel-loading panel-error">${extractErrorMessage(err)}</div>`
           })
         }
       }
       chainEl.innerHTML = chainHtml
     }).catch((err: unknown) => {
       const el = document.getElementById('tile-chain-data')
-      if (el) el.innerHTML = `<span class="tile-panel-error">Failed to load</span>`
+      if (el) el.innerHTML = `<span class="panel-error">Failed to load</span>`
       console.warn('fetchTile error:', err)
     })
   }

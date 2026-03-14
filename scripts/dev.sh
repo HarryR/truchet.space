@@ -30,8 +30,8 @@ if ! kill -0 $ANVIL_PID 2>/dev/null; then
 fi
 echo "  Anvil running on :8545 (PID $ANVIL_PID)"
 
-# 4. Deploy contracts (random deployer to bust MetaMask eth_call cache)
-echo "[4/8] Deploying contracts..."
+# 4. Deploy contracts + seed tiles (random deployer to bust MetaMask eth_call cache)
+echo "[4/8] Deploying contracts + seeding tiles..."
 DEPLOYER_KEY=$(openssl rand -hex 32)
 DEPLOYER_ADDR=$(contracts/bin/cast wallet address "0x$DEPLOYER_KEY")
 ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
@@ -51,7 +51,7 @@ python3 scripts/extract-addresses.py
 source backend/.env
 
 # 6. Start webhook handler (processes TilePlaced → solver → tiles/)
-echo "[6/9] Starting webhook handler..."
+echo "[6/8] Starting webhook handler..."
 python3 -m backend.webhook_handler --port 8200 &
 WEBHOOK_PID=$!
 sleep 1
@@ -63,7 +63,7 @@ fi
 echo "  Webhook handler on :8200 (PID $WEBHOOK_PID)"
 
 # 7. Start static tile server (serves tiles from disk)
-echo "[7/9] Starting static tile server..."
+echo "[7/8] Starting static tile server..."
 python3 -m backend.server &
 BACKEND_PID=$!
 sleep 1
@@ -74,17 +74,10 @@ if ! kill -0 $BACKEND_PID 2>/dev/null; then
 fi
 echo "  Static tile server on :8100 (PID $BACKEND_PID)"
 
-# 8. Seed initial tiles
-echo "[8/9] Seeding tiles on Anvil..."
-DEPLOYER_KEY="0x$DEPLOYER_KEY" DEPLOYER_ADDR="$DEPLOYER_ADDR" python3 -m backend.seed_anvil
-
-# 9. Switch Anvil to 12-second block intervals (realistic block time)
-echo "[9/10] Switching Anvil to 12s block time..."
+# 8. Switch to 12s blocks, start follower + frontend
+echo "[8/8] Starting Anvil follower & frontend (Ctrl+C to stop all)..."
 contracts/bin/cast rpc evm_setIntervalMining 12 --rpc-url http://127.0.0.1:8545 > /dev/null
 echo "  Block time: 12s"
-
-# 10. Start Anvil follower + Vite frontend
-echo "[10/10] Starting Anvil follower & frontend (Ctrl+C to stop all)..."
 python3 -m backend.anvil_follower \
     --webhook-url http://localhost:8200/webhook \
     --rpc-url "$ANVIL_RPC" \
