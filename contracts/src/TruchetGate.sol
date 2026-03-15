@@ -40,6 +40,7 @@ contract TruchetGate {
     error NotOwner();
     error ZeroAddress();
     error WrongETH();
+    error WrongNonce();
     error TransferFailed();
 
     modifier onlyOwner() {
@@ -100,6 +101,10 @@ contract TruchetGate {
         bytes32 authR,
         bytes32 authS
     ) external {
+        // Nonce must be SHA-256(q ‖ r ‖ ka ‖ kb ‖ kc ‖ catalanIndex) to bind
+        // the USDC authorization to this specific tile placement.
+        bytes32 expected = sha256(abi.encodePacked(q, r, ka, kb, kc, catalanIndex));
+        if (nonce != expected) revert WrongNonce();
         usdc.receiveWithAuthorization(from, address(this), priceUSDC, validAfter, validBefore, nonce, v, authR, authS);
         nft.placeTile(from, q, r, ka, kb, kc, catalanIndex);
     }

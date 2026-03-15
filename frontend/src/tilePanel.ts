@@ -6,6 +6,7 @@
 import { isPlaced, getTile } from './grid'
 import { neighbor } from './hex'
 import {
+  type OnChainTile,
   tokenIdOf,
   placeTileETH, placeTileUSDC, waitForReceipt,
 } from './contracts'
@@ -14,7 +15,7 @@ import { NFT_ADDRESS, BLOCK_EXPLORER } from './config'
 import { formatEther, formatUnits } from './abi'
 import { pickCatalanIndex, catalan, nextValidValue, type TileConstraints } from './tileParams'
 import { signUsdcAuthorization } from './usdc'
-import { el_div, el_span, el_button, field, extLink } from './html'
+import { el_div, el_span, el_button, field, extLink, C_FIELD, C_LABEL, C_VALUE, C_VALUE_MONO, C_VALUE_ERR, C_CLOSE, C_LOAD, C_ERR, C_MBTN } from './html'
 import * as store from './store'
 
 // ── State ──
@@ -152,47 +153,47 @@ function renderMintArea(container: HTMLElement, s: MintUIState) {
     }
     const epSum = s.eps[0] + s.eps[1] + s.eps[2]
     const familySize = catalan(epSum)
-    epHtml += field('Family size', `C(${epSum}) = ${familySize.toLocaleString()}`, 'panel-value mono')
+    epHtml += field('Family size', `C(${epSum}) = ${familySize.toLocaleString()}`, C_VALUE_MONO)
     html += el_div('ep-controls', epHtml)
 
     // Prices + balances
     if (s.ethPrice !== null) {
-      html += field('ETH price', `${formatEther(s.ethPrice)} ETH`, 'panel-value mono')
+      html += field('ETH price', `${formatEther(s.ethPrice)} ETH`, C_VALUE_MONO)
     }
     if (s.usdcPrice !== null) {
-      html += field('USDC price', `${formatUnits(s.usdcPrice, 6)} USDC`, 'panel-value mono')
+      html += field('USDC price', `${formatUnits(s.usdcPrice, 6)} USDC`, C_VALUE_MONO)
     }
 
     // Buttons
     const connected = isConnected()
     const correctChain = isCorrectChain()
     if (!connected) {
-      html += el_button('mint-btn', 'Connect wallet', ' disabled')
+      html += el_button(C_MBTN, 'Connect wallet', ' disabled')
     } else if (!correctChain) {
-      html += el_button('mint-btn', 'Switch network', ' disabled')
+      html += el_button(C_MBTN, 'Switch network', ' disabled')
     } else {
       const ethBal = getEthBalance()
       const usdcBal = getUsdcBalance()
       const ethDisabled = s.ethPrice !== null && ethBal !== null && parseFloat(ethBal) < parseFloat(formatEther(s.ethPrice))
       const usdcDisabled = s.usdcPrice !== null && usdcBal !== null && parseFloat(usdcBal) < parseFloat(formatUnits(s.usdcPrice, 6))
-      html += el_button('mint-btn', 'Mint with ETH', ` id="mint-eth-btn"${ethDisabled ? ' disabled title="Insufficient ETH"' : ''}`)
-      html += el_button('mint-btn', 'Mint with USDC', ` id="mint-usdc-btn"${usdcDisabled ? ' disabled title="Insufficient USDC"' : ''}`)
+      html += el_button(C_MBTN, 'Mint with ETH', ` id="mint-eth-btn"${ethDisabled ? ' disabled title="Insufficient ETH"' : ''}`)
+      html += el_button(C_MBTN, 'Mint with USDC', ` id="mint-usdc-btn"${usdcDisabled ? ' disabled title="Insufficient USDC"' : ''}`)
     }
   } else if (s.flowState === 'confirming') {
     html = field('Status', 'confirm in wallet')
   } else if (s.flowState === 'pending') {
     const value = s.txHash
-      ? extLink('panel-value', `${BLOCK_EXPLORER}/tx/${s.txHash}`, 'minting')
-      : el_span('panel-value', 'minting')
-    html = el_div('panel-field', el_span('panel-label', 'Status') + value)
+      ? extLink(C_VALUE, `${BLOCK_EXPLORER}/tx/${s.txHash}`, 'minting')
+      : el_span(C_VALUE, 'minting')
+    html = el_div(C_FIELD, el_span(C_LABEL, 'Status') + value)
   } else if (s.flowState === 'confirmed') {
     const value = s.txHash
-      ? extLink('panel-value', `${BLOCK_EXPLORER}/tx/${s.txHash}`, 'minted')
-      : el_span('panel-value', 'minted')
-    html = el_div('panel-field', el_span('panel-label', 'Status') + value)
+      ? extLink(C_VALUE, `${BLOCK_EXPLORER}/tx/${s.txHash}`, 'minted')
+      : el_span(C_VALUE, 'minted')
+    html = el_div(C_FIELD, el_span(C_LABEL, 'Status') + value)
   } else if (s.flowState === 'error') {
-    html = field('Status', s.errorMsg ?? 'Unknown error', 'panel-value panel-error')
-    html += el_button('mint-btn', 'Try again', ' id="mint-retry-btn"')
+    html = field('Status', s.errorMsg ?? 'Unknown error', C_VALUE_ERR)
+    html += el_button(C_MBTN, 'Try again', ' id="mint-retry-btn"')
   }
 
   container.innerHTML = html
@@ -237,7 +238,7 @@ async function runMintFlow(s: MintUIState, method: 'eth' | 'usdc') {
     } else {
       const price = s.usdcPrice ?? (await store.fetchPrices()).usdc
       if (!price) throw new Error('Could not fetch USDC price')
-      const auth = await signUsdcAuthorization(price)
+      const auth = await signUsdcAuthorization(price, { q, r, ka, kb, kc, catalanIndex })
       txHash = await placeTileUSDC(
         auth.from, q, r, ka, kb, kc, catalanIndex,
         auth.validAfter, auth.validBefore, auth.nonce, auth.v, auth.r, auth.s,
@@ -306,7 +307,7 @@ export function showTilePanel(q: number, r: number) {
   const tokenId = tokenIdOf(q, r)
   const cached = getTile(q, r)
 
-  let html = el_button('panel-close', '&times;')
+  let html = el_button(C_CLOSE, '&times;')
   html += `<a class="panel-title" href="#tile=${q},${r}">Tile (${q}, ${r})</a>`
   html += field('Token ID', String(tokenId))
 
@@ -318,12 +319,12 @@ export function showTilePanel(q: number, r: number) {
       html += field('Catalan index', String(cached.catalanIndex))
       html += field('Polarity', cached.polarity ? 'positive' : 'negative')
       if (cached.minter) {
-        html += el_div('panel-field',
-          el_span('panel-label', 'Minter') +
-          el_span('panel-value mono', shortAddr(cached.minter), ` title="${cached.minter}"`))
+        html += el_div(C_FIELD,
+          el_span(C_LABEL, 'Minter') +
+          el_span(C_VALUE_MONO, shortAddr(cached.minter), ` title="${cached.minter}"`))
       }
     } else {
-      html += el_span('panel-loading', 'Loading metadata...')
+      html += el_span(C_LOAD, 'Loading metadata...')
     }
   } else {
     html += el_div('panel-empty', 'Empty cell')
@@ -337,9 +338,9 @@ export function showTilePanel(q: number, r: number) {
     if (onChain) {
       html += renderChainData(onChain)
     } else {
-      html += el_span('panel-loading', 'Loading on-chain data...')
+      html += el_span(C_LOAD, 'Loading on-chain data...')
       // Kick off RPC fetch — store.subscribe will re-render when data arrives
-      store.fetchTileData(q, r).catch(() => {})
+      store.fetchTileData(q, r).catch(err => console.debug('fetchTileData failed:', err))
     }
   }
   html += `</div>`
@@ -370,11 +371,11 @@ export function showTilePanel(q: number, r: number) {
           field('Family', `${tile.ka}-${tile.kb}-${tile.kc}`) +
           field('Catalan index', String(tile.catalanIndex)) +
           field('Polarity', tile.polarity ? 'positive' : 'negative') +
-          (tile.minter ? el_div('panel-field',
-            el_span('panel-label', 'Minter') +
-            el_span('panel-value mono', shortAddr(tile.minter), ` title="${tile.minter}"`)) : '')
+          (tile.minter ? el_div(C_FIELD,
+            el_span(C_LABEL, 'Minter') +
+            el_span(C_VALUE_MONO, shortAddr(tile.minter), ` title="${tile.minter}"`)) : '')
       } else {
-        metaEl.innerHTML = el_span('panel-error', 'Metadata unavailable')
+        metaEl.innerHTML = el_span(C_ERR, 'Metadata unavailable')
       }
     })
   }
@@ -405,13 +406,13 @@ function setupMintControls(q: number, r: number) {
   const constraints = store.computeConstraints(q, r)
   if (!constraints) {
     const mintEl = document.getElementById('tile-mint-area')
-    if (mintEl) mintEl.innerHTML = el_div('panel-loading', 'Loading constraints...')
+    if (mintEl) mintEl.innerHTML = el_div(C_LOAD, 'Loading constraints...')
     return
   }
 
   // Fetch prices if not cached
   if (store.getEthPrice() === null || store.getUsdcPrice() === null) {
-    store.fetchPrices().catch(() => {})
+    store.fetchPrices().catch(err => console.debug('fetchPrices failed:', err))
   }
 
   const mintEl = document.getElementById('tile-mint-area')
@@ -428,17 +429,17 @@ function setupMintControls(q: number, r: number) {
   bindMintButtons(mintEl, uiState)
 }
 
-function renderChainData(onChain: import('./contracts').OnChainTile): string {
+function renderChainData(onChain: OnChainTile): string {
   const zeroAddr = '0x' + '0'.repeat(40)
   const owned = onChain.tileOwner !== zeroAddr
   let html = ''
 
   if (owned) {
-    html += el_div('panel-field',
-      el_span('panel-label', 'Owner') +
-      el_span('panel-value mono', shortAddr(onChain.tileOwner), ` title="${onChain.tileOwner}"`))
+    html += el_div(C_FIELD,
+      el_span(C_LABEL, 'Owner') +
+      el_span(C_VALUE_MONO, shortAddr(onChain.tileOwner), ` title="${onChain.tileOwner}"`))
   } else {
-    html += el_div('panel-field', el_span('panel-label', 'Status') + el_span('panel-value', 'Not minted'), ' id="tile-chain-status"')
+    html += el_div(C_FIELD, el_span(C_LABEL, 'Status') + el_span(C_VALUE, 'Not minted'), ' id="tile-chain-status"')
   }
   return html
 }

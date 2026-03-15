@@ -118,6 +118,11 @@ export const EP_SUM_MAX = 64
 /** Max attempts when picking a random unused Catalan index. */
 export const CATALAN_PICK_ATTEMPTS = 10
 
+// ── USDC authorization ──
+
+/** How long (seconds) a signed USDC ReceiveWithAuthorization remains valid. */
+export const USDC_AUTH_LIFETIME_S = 600 // 10 minutes
+
 // ── Price caching ──
 
 /** How long (ms) before cached ETH/USDC prices are considered stale. */

@@ -2,6 +2,8 @@
 
 ## Build & Test
 
+- Package manager: **pnpm** (not npm)
+- Frontend: `cd frontend && pnpm install && pnpm build`
 - Solidity toolchain (forge) is at `contracts/bin/forge`
 - There's a `Makefile` in `contracts/` for common tasks
 - Run tests: `cd contracts && ./bin/forge test`

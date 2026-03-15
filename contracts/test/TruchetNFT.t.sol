@@ -76,13 +76,17 @@ contract TruchetNFTTest is Test {
 
     // ── Helpers ───────────────────────────────────────────────
 
-    function _placeUSDC(address who, address submitter, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci, bytes32 nonce) internal {
+    function _tileNonce(uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal pure returns (bytes32) {
+        return sha256(abi.encodePacked(q, r, ka, kb, kc, ci));
+    }
+
+    function _placeUSDC(address who, address submitter, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
         vm.prank(submitter);
-        gate.placeTileUSDC(who, q, r, ka, kb, kc, ci, 0, type(uint256).max, nonce, 0, bytes32(0), bytes32(0));
+        gate.placeTileUSDC(who, q, r, ka, kb, kc, ci, 0, type(uint256).max, _tileNonce(q, r, ka, kb, kc, ci), 0, bytes32(0), bytes32(0));
     }
 
     function _placeUSDC(address who, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
-        _placeUSDC(who, who, q, r, ka, kb, kc, ci, keccak256(abi.encodePacked(q, r)));
+        _placeUSDC(who, who, q, r, ka, kb, kc, ci);
     }
 
     function _placeETH(address who, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
@@ -283,7 +287,7 @@ contract TruchetNFTTest is Test {
 
     function test_placeTileUSDC_viaRelayer() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        _placeUSDC(alice, relayer, 11, 10, 2, 2, 2, 1, keccak256("nonce1"));
+        _placeUSDC(alice, relayer, 11, 10, 2, 2, 2, 1);
         assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
     }
 
@@ -294,12 +298,12 @@ contract TruchetNFTTest is Test {
         assertEq(usdc.balanceOf(address(gate)) - gateBefore, PRICE_USDC);
     }
 
-    function test_placeTileUSDC_duplicateNonce() public {
+    function test_placeTileUSDC_wrongNonce() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        bytes32 nonce = keccak256("nonce1");
-        _placeUSDC(alice, alice, 11, 10, 2, 2, 2, 1, nonce);
-        vm.expectRevert("nonce used");
-        _placeUSDC(alice, alice, 10, 11, 2, 2, 2, 2, nonce);
+        bytes32 badNonce = keccak256("wrong");
+        vm.prank(alice);
+        vm.expectRevert(TruchetGate.WrongNonce.selector);
+        gate.placeTileUSDC(alice, 11, 10, 2, 2, 2, 1, 0, type(uint256).max, badNonce, 0, bytes32(0), bytes32(0));
     }
 
     // ── Gate admin ──────────────────────────────────────────

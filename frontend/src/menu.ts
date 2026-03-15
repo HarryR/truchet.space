@@ -2,7 +2,7 @@
  * Top menu bar — logo + wallet connect button + wallet dialog.
  */
 
-import { el_div, el_button, field } from './html'
+import { el_div, el_button, field, C_CLOSE } from './html'
 import {
   getAddress,
   isConnected,
@@ -91,7 +91,7 @@ export function initMenu() {
     const providers = getProviders()
     const activeRdns = getActiveRdns()
 
-    let html = el_button( 'panel-close', '&times;', ' aria-label="Close"')
+    let html = el_button( C_CLOSE, '&times;', ' aria-label="Close"')
 
     if (addr) {
       html += el_div( 'panel-title', mediumAddr(addr), ` title="${addr}"`)

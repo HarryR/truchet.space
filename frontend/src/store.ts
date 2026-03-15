@@ -117,7 +117,8 @@ function drainSvgQueue() {
         }
         img.src = url
       })
-      .catch(() => {
+      .catch(err => {
+        console.debug('SVG load failed:', k, err)
         svgQueued.delete(k)
         svgInFlight--
         drainSvgQueue()
@@ -219,13 +220,13 @@ export function computeConstraints(q: number, r: number): TileConstraints | null
   const nbTiles: (TileData | null)[] = []
   for (let edge = 0; edge < 6; edge++) {
     const { q: nq, r: nr } = neighbor(q, r, edge)
-    nbTiles[edge] = isOccupied(nq, nr) ? (getTile(nq, nr) ?? null) : null
-  }
-
-  // If any occupied neighbor doesn't have metadata yet, we can't compute
-  for (let edge = 0; edge < 6; edge++) {
-    const { q: nq, r: nr } = neighbor(q, r, edge)
-    if (isOccupied(nq, nr) && !getTile(nq, nr)) return null
+    if (isOccupied(nq, nr)) {
+      const tile = getTile(nq, nr)
+      if (!tile) return null // neighbor metadata not loaded yet
+      nbTiles[edge] = tile
+    } else {
+      nbTiles[edge] = null
+    }
   }
 
   const constraints = computeConstraintsFromNeighbors(nbTiles)

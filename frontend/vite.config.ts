@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin, loadEnv } from 'vite'
+import { viteSingleFile } from 'vite-plugin-singlefile'
 import { visualizer } from 'rollup-plugin-visualizer'
 
 const REQUIRED_ENV = [
@@ -26,15 +27,15 @@ function envCheck(): Plugin {
 
 export default defineConfig({
   build: {
-    rollupOptions: {
-      output: {
-        // Single JS chunk — no code splitting
-        manualChunks: () => 'index',
-      },
+    target: 'es2022',
+    minify: 'terser',
+    terserOptions: {
+      compress: { passes: 2 },
     },
   },
   plugins: [
     envCheck(),
+    viteSingleFile(),
     visualizer({
       filename: 'dist/stats.html',
       gzipSize: true,
