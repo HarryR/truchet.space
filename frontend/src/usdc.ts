@@ -10,7 +10,6 @@ export interface UsdcAuthParams {
   from: string
   validAfter: bigint
   validBefore: bigint
-  nonce: string
   v: number
   r: string
   s: string
@@ -112,5 +111,5 @@ export async function signUsdcAuthorization(value: bigint, tile: TilePlacement):
   const s = '0x' + raw.slice(64, 128)
   const v = parseInt(raw.slice(128, 130), 16)
 
-  return { from, validAfter, validBefore, nonce, v, r, s }
+  return { from, validAfter, validBefore, v, r, s }
 }

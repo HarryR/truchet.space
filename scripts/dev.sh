@@ -42,13 +42,28 @@ echo "  Deployer: $DEPLOYER_ADDR"
     --rpc-url http://127.0.0.1:8545 --broadcast \
     --private-key "0x$DEPLOYER_KEY")
 
-# 5. Extract addresses (writes backend/.env)
+# 5. Extract addresses (writes backend/.env + frontend/.env.local)
 echo "[5/8] Extracting contract addresses..."
 python3 scripts/extract-addresses.py
 
 # Load extracted addresses for follower args
 # shellcheck disable=SC1091
 source backend/.env
+# shellcheck disable=SC1091
+source frontend/.env.local
+
+# Mint MockUSDC to Anvil's default test accounts
+if [ -n "$VITE_USDC_ADDRESS" ]; then
+    echo "  Minting MockUSDC to Anvil test accounts..."
+    MINT_SIG="mint(address,uint256)"
+    MINT_AMOUNT="1000000000000"  # 1M USDC (6 decimals)
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+        ACCT=$(contracts/bin/cast wallet address --mnemonic "test test test test test test test test test test test junk" --mnemonic-index "$i")
+        contracts/bin/cast send "$VITE_USDC_ADDRESS" "$MINT_SIG" "$ACCT" "$MINT_AMOUNT" \
+            --private-key "0x$DEPLOYER_KEY" --rpc-url http://127.0.0.1:8545 > /dev/null
+    done
+    echo "  Minted 1M USDC to 10 Anvil accounts"
+fi
 
 # 6. Start webhook handler (processes TilePlaced → solver → tiles/)
 echo "[6/8] Starting webhook handler..."

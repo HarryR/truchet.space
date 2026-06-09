@@ -8,7 +8,7 @@ import { neighbor } from './hex'
 import {
   type OnChainTile,
   tokenIdOf,
-  placeTileETH, placeTileUSDC, waitForReceipt,
+  placeTileEth, placeTileUsdc, waitForReceipt,
 } from './contracts'
 import { isConnected, isCorrectChain, getEthBalance, getUsdcBalance } from './wallet'
 import { NFT_ADDRESS, BLOCK_EXPLORER } from './config'
@@ -234,14 +234,14 @@ async function runMintFlow(s: MintUIState, method: 'eth' | 'usdc') {
 
     let txHash: string
     if (method === 'eth') {
-      txHash = await placeTileETH(q, r, ka, kb, kc, catalanIndex)
+      txHash = await placeTileEth(q, r, ka, kb, kc, catalanIndex)
     } else {
       const price = s.usdcPrice ?? (await store.fetchPrices()).usdc
       if (!price) throw new Error('Could not fetch USDC price')
       const auth = await signUsdcAuthorization(price, { q, r, ka, kb, kc, catalanIndex })
-      txHash = await placeTileUSDC(
-        auth.from, q, r, ka, kb, kc, catalanIndex,
-        auth.validAfter, auth.validBefore, auth.nonce, auth.v, auth.r, auth.s,
+      txHash = await placeTileUsdc(
+        auth.from, q, r, ka, kb, kc, catalanIndex, price,
+        auth.validAfter, auth.validBefore, auth.v, auth.r, auth.s,
       )
     }
 

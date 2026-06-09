@@ -43,14 +43,17 @@ def main():
             print(f"  {c['name']}: {c['address']}")
         sys.exit(1)
 
-    # Deploy.s.sol deploys TruchetNFT first, then TruchetGate
+    # Extract addresses by contract name
     nft_address = ""
     gate_address = ""
+    usdc_address = ""
     for c in creates:
         if c["name"] == "TruchetNFT":
             nft_address = c["address"]
         elif c["name"] == "TruchetGate":
             gate_address = c["address"]
+        elif c["name"] == "MockUSDC":
+            usdc_address = c["address"]
 
     if not nft_address or not gate_address:
         # Fallback: assume order (NFT first, Gate second)
@@ -59,6 +62,8 @@ def main():
 
     print(f"TruchetNFT:  {nft_address}")
     print(f"TruchetGate: {gate_address}")
+    if usdc_address:
+        print(f"MockUSDC:    {usdc_address}")
 
     # Write frontend/.env.local
     frontend_env = os.path.join(ROOT, "frontend", ".env.local")
@@ -67,7 +72,7 @@ def main():
         f.write(f"VITE_GATE_ADDRESS={gate_address}\n")
         f.write("VITE_CHAIN_ID=31337\n")
         f.write("VITE_RPC_URL=http://127.0.0.1:8545\n")
-        f.write("VITE_USDC_ADDRESS=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\n")
+        f.write(f"VITE_USDC_ADDRESS={usdc_address or '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'}\n")
         f.write("VITE_BLOCK_EXPLORER=http://127.0.0.1:8545\n")
         f.write("VITE_TILE_CDN=http://localhost:8100\n")
     print(f"Wrote {frontend_env}")

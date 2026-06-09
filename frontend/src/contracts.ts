@@ -19,10 +19,9 @@ export { callRpc, waitForReceipt } from './ethrpc'
 
 export const SEL = {
   balanceOf:      '0x70a08231',
-  priceETH:       '0xc38ad273',
-  priceUSDC:      '0x998ef386',
-  placeTileETH:   '0xb289fc6e',
-  placeTileUSDC:  '0xc222c110',
+  getPrices:      '0xbd9a548b',
+  placeTileEth:   '0xd654a0db',
+  placeTileUsdc:  '0x998fb0af',
   getTile:        '0x25181bd2',
   isCatalanUsed:  '0x704a9bfe',
   readOccupancy:  '0xfcb69665',
@@ -50,13 +49,15 @@ function debugCall(data: string, label?: string) {
   console.debug(`${label ?? 'eth_call'} ${name}`, data)
 }
 
-export async function fetchPriceETH(): Promise<bigint> {
+export async function fetchPrices(): Promise<{ eth: bigint; usdc: bigint }> {
   if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
-  debugCall(SEL.priceETH)
-  const resultHex = await callRpc(GATE_ADDRESS, SEL.priceETH)
-  const price = decodeUint(splitWords(resultHex)[0])
-  console.log('fetchPriceETH:', price)
-  return price
+  debugCall(SEL.getPrices)
+  const resultHex = await callRpc(GATE_ADDRESS, SEL.getPrices)
+  const w = splitWords(resultHex)
+  const eth = decodeUint(w[0])
+  const usdc = decodeUint(w[1])
+  console.log('fetchPrices:', { eth, usdc })
+  return { eth, usdc }
 }
 
 export interface OnChainTile {
@@ -93,15 +94,6 @@ export function tokenIdOf(q: number, r: number): bigint {
   return (BigInt(q & 0x1FF) << 9n) | BigInt(r & 0x1FF)
 }
 
-export async function fetchPriceUSDC(): Promise<bigint> {
-  if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
-  debugCall(SEL.priceUSDC)
-  const resultHex = await callRpc(GATE_ADDRESS, SEL.priceUSDC)
-  const price = decodeUint(splitWords(resultHex)[0])
-  console.log('fetchPriceUSDC:', price)
-  return price
-}
-
 export async function isCatalanUsed(ka: number, kb: number, kc: number, idx: bigint): Promise<boolean> {
   if (!NFT_ADDRESS) throw new Error('NFT_ADDRESS not configured')
   const calldata = encode(SEL.isCatalanUsed, encodeUint(ka), encodeUint(kb), encodeUint(kc), encodeUint(idx))
@@ -123,7 +115,21 @@ async function sendTx(txParams: Record<string, string>): Promise<string> {
   return await rpc<string>(provider, 'eth_sendTransaction', [txParams])
 }
 
-export async function placeTileETH(
+/** Pack tile params into a single uint256 matching the contract layout:
+ *  [catalanIndex 128][kc 8][kb 8][ka 8][r 16][q 16] */
+function packTile(q: number, r: number, ka: number, kb: number, kc: number, catalanIndex: bigint): bigint {
+  return BigInt(q) | (BigInt(r) << 16n) | (BigInt(ka) << 32n) | (BigInt(kb) << 40n) | (BigInt(kc) << 48n) | (catalanIndex << 56n)
+}
+
+/** Convert a signature (v, r, s) to EIP-2098 compact form (sigR, sigVS). */
+function compactSig(v: number, r: string, s: string): { sigR: bigint; sigVS: bigint } {
+  const sigR = BigInt('0x' + r.replace('0x', ''))
+  const sBig = BigInt('0x' + s.replace('0x', ''))
+  const sigVS = sBig | (BigInt(v - 27) << 255n)
+  return { sigR, sigVS }
+}
+
+export async function placeTileEth(
   q: number,
   r: number,
   ka: number,
@@ -135,18 +141,16 @@ export async function placeTileETH(
   const from = getAddress()
   if (!from) throw new Error('No account selected')
 
-  const price = await fetchPriceETH()
+  const { eth: price } = await fetchPrices()
   const calldata = encode(
-    SEL.placeTileETH,
-    encodeUint(q), encodeUint(r),
-    encodeUint(ka), encodeUint(kb), encodeUint(kc),
-    encodeUint(catalanIndex),
+    SEL.placeTileEth,
+    encodeUint(packTile(q, r, ka, kb, kc, catalanIndex)),
   )
 
   return sendTx({ from, to: GATE_ADDRESS, data: calldata, value: '0x' + price.toString(16) })
 }
 
-export async function placeTileUSDC(
+export async function placeTileUsdc(
   from: string,
   q: number,
   r: number,
@@ -154,27 +158,25 @@ export async function placeTileUSDC(
   kb: number,
   kc: number,
   catalanIndex: bigint,
+  amount: bigint,
   validAfter: bigint,
   validBefore: bigint,
-  nonce: string,
   v: number,
   authR: string,
   authS: string,
 ): Promise<string> {
   if (!GATE_ADDRESS) throw new Error('GATE_ADDRESS not configured')
 
+  const { sigR, sigVS } = compactSig(v, authR, authS)
   const calldata = encode(
-    SEL.placeTileUSDC,
+    SEL.placeTileUsdc,
     encodeAddress(from),
-    encodeUint(q), encodeUint(r),
-    encodeUint(ka), encodeUint(kb), encodeUint(kc),
-    encodeUint(catalanIndex),
+    encodeUint(packTile(q, r, ka, kb, kc, catalanIndex)),
+    encodeUint(amount),
     encodeUint(validAfter),
     encodeUint(validBefore),
-    nonce.replace('0x', '').padStart(64, '0'),
-    encodeUint(v),
-    authR.replace('0x', '').padStart(64, '0'),
-    authS.replace('0x', '').padStart(64, '0'),
+    encodeUint(sigR),
+    encodeUint(sigVS),
   )
 
   return sendTx({ from, to: GATE_ADDRESS, data: calldata })

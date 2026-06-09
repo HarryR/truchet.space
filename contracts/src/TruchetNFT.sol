@@ -1,37 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-interface IERC165 {
-    function supportsInterface(bytes4 interfaceId) external view returns (bool);
-}
-
-interface IERC721 is IERC165 {
-    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
-    event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
-    event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
-
-    function balanceOf(address owner) external view returns (uint256);
-    function ownerOf(uint256 tokenId) external view returns (address);
-    function safeTransferFrom(address from, address to, uint256 tokenId, bytes calldata data) external;
-    function safeTransferFrom(address from, address to, uint256 tokenId) external;
-    function transferFrom(address from, address to, uint256 tokenId) external;
-    function approve(address to, uint256 tokenId) external;
-    function setApprovalForAll(address operator, bool approved) external;
-    function getApproved(uint256 tokenId) external view returns (address);
-    function isApprovedForAll(address owner, address operator) external view returns (bool);
-}
-
-interface IERC721Metadata is IERC721 {
-    function name() external view returns (string memory);
-    function symbol() external view returns (string memory);
-    function tokenURI(uint256 tokenId) external view returns (string memory);
-}
-
-interface IERC721TokenReceiver {
-    function onERC721Received(address operator, address from, uint256 tokenId, bytes calldata data)
-        external
-        returns (bytes4);
-}
+import {IERC721Metadata, IERC721TokenReceiver} from "./IERC721.sol";
 
 /// @title TruchetNFT — Collaborative hex grid of Truchet tiles
 /// @notice Each token represents a tile placed on a toroidal 512×512 hex grid (even-q offset).
@@ -120,8 +90,12 @@ contract TruchetNFT is IERC721Metadata {
     // ── Modifiers ─────────────────────────────────────────────
 
     modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
+        _checkOwner();
         _;
+    }
+
+    function _checkOwner() internal view {
+        if (msg.sender != owner) revert NotOwner();
     }
 
     // ── Constructor ───────────────────────────────────────────
@@ -148,8 +122,8 @@ contract TruchetNFT is IERC721Metadata {
     }
 
     function tokenCoords(uint256 tokenId) public pure returns (uint16 q, uint16 r) {
-        q = uint16((tokenId >> 9) & uint256(MASK));
-        r = uint16(tokenId & uint256(MASK));
+        q = uint16((tokenId >> 9) & 0x1FF);
+        r = uint16((tokenId) & 0x1FF);
     }
 
     // ── Hex grid: even-q offset neighbors (toroidal) ─────────
@@ -194,8 +168,8 @@ contract TruchetNFT is IERC721Metadata {
             wnq = (wq + 1) & m;
             wnr = evenCol ? (wr + m) & m : wr;
         }
-        nq = uint16(wnq);
-        nr = uint16(wnr);
+        nq = uint16((wnq) & 0x1FF);
+        nr = uint16((wnr) & 0x1FF);
     }
 
     /// @dev Packed grid cell key — same layout as tokenId.
@@ -281,11 +255,11 @@ contract TruchetNFT is IERC721Metadata {
         uint256 cachedFamWord;
 
         for (uint256 col = 0; col < width; col++) {
-            uint16 q = (q0 + uint16(col)) & MASK;
+            uint16 q = (q0 + uint16((col) & 0xFFFF)) & MASK;
             for (uint256 row = 0; row < height; row++) {
                 uint256 i = col * uint256(height) + row;
                 uint8 ka = kas[i]; uint8 kb = kbs[i]; uint8 kc = kcs[i];
-                uint16 r = (r0 + uint16(row)) & MASK;
+                uint16 r = (r0 + uint16((row) & 0xFFFF)) & MASK;
                 uint256 tokenId = (uint256(q) << 9) | uint256(r);
 
                 // Polarity bitmap: 8×8 square block layout
@@ -313,9 +287,9 @@ contract TruchetNFT is IERC721Metadata {
                     cachedFamWord = _familyCatalanBitmap[fWordKey];
                     cachedFamKey = fWordKey;
                 }
-                cachedFamWord = cachedFamWord | (1 << (uint256(idx) & 255));
+                cachedFamWord = cachedFamWord | (uint256(1) << (uint256(idx) & 255));
 
-                _grid[_cellKey(q, r)] = Tile(ka, kb, kc, pol, idx);
+                _grid[_cellKey(q, r)] = Tile({ ka: ka, kb: kb, kc: kc, polarity: pol, catalanIndex: idx });
                 _owners[tokenId] = to;
 
                 emit Transfer(address(0), to, tokenId);
@@ -475,11 +449,11 @@ contract TruchetNFT is IERC721Metadata {
 
         // Family+catalan uniqueness (bitmap: 256 indices per word)
         uint256 fWordKey = _familyWordKey(ka, kb, kc, catalanIndex);
-        uint256 fBit = 1 << (uint256(catalanIndex) & 255);
+        uint256 fBit = uint256(1) << (uint256(catalanIndex) & 255);
         if (_familyCatalanBitmap[fWordKey] & fBit != 0) revert CatalanIndexUsed(ka, kb, kc, catalanIndex);
         _familyCatalanBitmap[fWordKey] = _familyCatalanBitmap[fWordKey] | fBit;
 
-        _grid[_cellKey(q, r)] = Tile(ka, kb, kc, polarity, catalanIndex);
+        _grid[_cellKey(q, r)] = Tile({ ka: ka, kb: kb, kc: kc, polarity: polarity, catalanIndex: catalanIndex });
         _bitmapWrite(tokenId, _computeBitmapVal(ka, kb, kc, polarity));
         _balances[to]++;
         _owners[tokenId] = to;
@@ -525,7 +499,7 @@ contract TruchetNFT is IERC721Metadata {
     /// @notice Check whether a (family, catalanIndex) pair has been placed.
     function isCatalanUsed(uint8 ka, uint8 kb, uint8 kc, uint128 catalanIndex) public view returns (bool) {
         uint256 fWordKey = _familyWordKey(ka, kb, kc, catalanIndex);
-        return _familyCatalanBitmap[fWordKey] & (1 << (uint256(catalanIndex) & 255)) != 0;
+        return _familyCatalanBitmap[fWordKey] & (uint256(1) << (uint256(catalanIndex) & 255)) != 0;
     }
 
     /// @notice Returns tile data and owner at grid position (q, r).
@@ -616,12 +590,12 @@ contract TruchetNFT is IERC721Metadata {
 
     function safeTransferFrom(address from, address to, uint256 tokenId) public {
         transferFrom(from, to, tokenId);
-        _checkOnERC721Received(msg.sender, from, to, tokenId, "");
+        _checkOnErc721Received(msg.sender, from, to, tokenId, "");
     }
 
     function safeTransferFrom(address from, address to, uint256 tokenId, bytes calldata data) public {
         transferFrom(from, to, tokenId);
-        _checkOnERC721Received(msg.sender, from, to, tokenId, data);
+        _checkOnErc721Received(msg.sender, from, to, tokenId, data);
     }
 
     // ── Internals ─────────────────────────────────────────────
@@ -635,7 +609,7 @@ contract TruchetNFT is IERC721Metadata {
             || _operatorApprovals[tokenOwner][spender];
     }
 
-    function _checkOnERC721Received(address operator, address from, address to, uint256 tokenId, bytes memory data)
+    function _checkOnErc721Received(address operator, address from, address to, uint256 tokenId, bytes memory data)
         internal
     {
         if (to.code.length > 0) {
@@ -666,7 +640,7 @@ contract TruchetNFT is IERC721Metadata {
         bytes memory buffer = new bytes(digits);
         while (value != 0) {
             digits--;
-            buffer[digits] = bytes1(uint8(48 + value % 10));
+            buffer[digits] = bytes1(uint8((48 + value % 10) & 0xFF));
             value /= 10;
         }
         return string(buffer);

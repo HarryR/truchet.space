@@ -4,7 +4,7 @@
  */
 
 import { TILE_CDN, FRONTIER_STALE_MS, SVG_MAX_CONCURRENT, PRICE_TTL_MS, POLL_INTERVAL_MS, TILE_POLL_RETRY_MS, TX_TIMEOUT_MS } from './config'
-import { readOccupancyWords, fetchTile, fetchPriceETH, fetchPriceUSDC, type OnChainTile } from './contracts'
+import { readOccupancyWords, fetchTile, fetchPrices as rpcFetchPrices, type OnChainTile } from './contracts'
 import { neighbor } from './hex'
 import {
   applyOccupancyWords, expandFrontier, hasOccupancyData,
@@ -117,8 +117,7 @@ function drainSvgQueue() {
         }
         img.src = url
       })
-      .catch(err => {
-        console.debug('SVG load failed:', k, err)
+      .catch(() => {
         svgQueued.delete(k)
         svgInFlight--
         drainSvgQueue()
@@ -184,16 +183,13 @@ export async function fetchPrices(): Promise<{ eth: bigint | null; usdc: bigint 
   if (priceInflight) return priceInflight
 
   const promise = (async () => {
-    const [eth, usdc] = await Promise.all([
-      fetchPriceETH().catch(() => null as bigint | null),
-      fetchPriceUSDC().catch(() => null as bigint | null),
-    ])
+    const prices = await rpcFetchPrices()
     const fetchedAt = Date.now()
-    if (eth !== null) ethPrice = { value: eth, fetchedAt }
-    if (usdc !== null) usdcPrice = { value: usdc, fetchedAt }
+    ethPrice = { value: prices.eth, fetchedAt }
+    usdcPrice = { value: prices.usdc, fetchedAt }
     priceInflight = null
     notify()
-    return { eth, usdc }
+    return { eth: prices.eth, usdc: prices.usdc }
   })()
   priceInflight = promise
   return promise

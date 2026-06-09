@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "forge-std/Test.sol";
-import "../src/TruchetNFT.sol";
-import "../src/TruchetGate.sol";
+import {Test} from "forge-std/Test.sol";
+import {TruchetNFT} from "../src/TruchetNFT.sol";
+import {TruchetGate} from "../src/TruchetGate.sol";
+import {IERC721TokenReceiver} from "../src/IERC721.sol";
 
 contract Receiver is IERC721TokenReceiver {
     function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
@@ -76,22 +77,22 @@ contract TruchetNFTTest is Test {
 
     // ── Helpers ───────────────────────────────────────────────
 
-    function _tileNonce(uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal pure returns (bytes32) {
-        return sha256(abi.encodePacked(q, r, ka, kb, kc, ci));
+    function _packTile(uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal pure returns (uint256) {
+        return uint256(q) | (uint256(r) << 16) | (uint256(ka) << 32) | (uint256(kb) << 40) | (uint256(kc) << 48) | (uint256(ci) << 56);
     }
 
-    function _placeUSDC(address who, address submitter, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
+    function _placeUsdc(address who, address submitter, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
         vm.prank(submitter);
-        gate.placeTileUSDC(who, q, r, ka, kb, kc, ci, 0, type(uint256).max, _tileNonce(q, r, ka, kb, kc, ci), 0, bytes32(0), bytes32(0));
+        gate.placeTileUsdc(who, _packTile(q, r, ka, kb, kc, ci), PRICE_USDC, 0, type(uint256).max, 0, 0);
     }
 
-    function _placeUSDC(address who, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
-        _placeUSDC(who, who, q, r, ka, kb, kc, ci);
+    function _placeUsdc(address who, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
+        _placeUsdc(who, who, q, r, ka, kb, kc, ci);
     }
 
-    function _placeETH(address who, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
+    function _placeEth(address who, uint16 q, uint16 r, uint8 ka, uint8 kb, uint8 kc, uint128 ci) internal {
         vm.prank(who);
-        gate.placeTileETH{value: PRICE_ETH}(q, r, ka, kb, kc, ci);
+        gate.placeTileEth{value: PRICE_ETH}(_packTile(q, r, ka, kb, kc, ci));
     }
 
     /// @dev Seed a 1×1 block (single tile).
@@ -129,14 +130,14 @@ contract TruchetNFTTest is Test {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
         vm.expectEmit(true, true, true, true);
         emit TruchetNFT.TilePlaced(11, 10, alice, 2, 2, 2, true, 1);
-        _placeETH(alice, 11, 10, 2, 2, 2, 1);
+        _placeEth(alice, 11, 10, 2, 2, 2, 1);
     }
 
     function test_tilePlaced_polarityFlip() public {
         _seed(alice, 10, 10, 3, 2, 1, true, 0);
         vm.expectEmit(true, true, true, true);
         emit TruchetNFT.TilePlaced(11, 10, alice, 3, 2, 1, false, 1);
-        _placeETH(alice, 11, 10, 3, 2, 1, 1);
+        _placeEth(alice, 11, 10, 3, 2, 1, 1);
     }
 
     // ── Seed tiles ───────────────────────────────────────────
@@ -192,7 +193,7 @@ contract TruchetNFTTest is Test {
         uint8[] memory kcs = new uint8[](4);
         uint128[] memory idxs = new uint128[](4);
         for (uint256 j = 0; j < 4; j++) {
-            kas[j] = 2; kbs[j] = 2; kcs[j] = 2; idxs[j] = uint128(j);
+            kas[j] = 2; kbs[j] = 2; kcs[j] = 2; idxs[j] = uint128((j) & type(uint128).max);
         }
         // All polarities true → bits 0-3 set = 0xF
         nft.seedTiles(alice, 10, 10, 2, 2, kas, kbs, kcs, idxs, 0xF);
@@ -232,7 +233,7 @@ contract TruchetNFTTest is Test {
         uint16 r = 456;
         uint256 tokenId = (uint256(q) << 9) | uint256(r);
         assertEq(tokenId, (123 << 9) | 456);
-        (uint16 rq, uint16 rr) = (uint16(tokenId >> 9), uint16(tokenId & 511));
+        (uint16 rq, uint16 rr) = (uint16((tokenId >> 9) & 0x1FF), uint16((tokenId) & 0x1FF));
         assertEq(rq, q);
         assertEq(rr, r);
     }
@@ -255,55 +256,47 @@ contract TruchetNFTTest is Test {
 
     // ── Place tiles via gate ETH ────────────────────────────
 
-    function test_placeTileETH() public {
+    function test_placeTileEth() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        _placeETH(alice, 11, 10, 2, 2, 2, 1);
+        _placeEth(alice, 11, 10, 2, 2, 2, 1);
         assertEq(nft.totalSupply(), 2);
         assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
     }
 
-    function test_placeTileETH_pullsETH() public {
+    function test_placeTileEth_pullsETH() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 gateBefore = address(gate).balance;
-        _placeETH(alice, 11, 10, 2, 2, 2, 1);
+        _placeEth(alice, 11, 10, 2, 2, 2, 1);
         assertEq(address(gate).balance - gateBefore, PRICE_ETH);
     }
 
-    function test_placeTileETH_wrongValue() public {
+    function test_placeTileEth_wrongValue() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
         vm.prank(alice);
-        vm.expectRevert(TruchetGate.WrongETH.selector);
-        gate.placeTileETH{value: 0.001 ether}(11, 10, 2, 2, 2, 1);
+        vm.expectRevert(TruchetGate.InsufficientETH.selector);
+        gate.placeTileEth{value: 0.001 ether}(_packTile(11, 10, 2, 2, 2, 1));
     }
 
     // ── Place tiles via gate USDC ───────────────────────────
 
-    function test_placeTileUSDC() public {
+    function test_placeTileUsdc() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        _placeUSDC(alice, 11, 10, 2, 2, 2, 1);
+        _placeUsdc(alice, 11, 10, 2, 2, 2, 1);
         assertEq(nft.totalSupply(), 2);
         assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
     }
 
-    function test_placeTileUSDC_viaRelayer() public {
+    function test_placeTileUsdc_viaRelayer() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        _placeUSDC(alice, relayer, 11, 10, 2, 2, 2, 1);
+        _placeUsdc(alice, relayer, 11, 10, 2, 2, 2, 1);
         assertEq(nft.ownerOf(nft.tokenIdOf(11, 10)), alice);
     }
 
-    function test_placeTileUSDC_pullsUSDC() public {
+    function test_placeTileUsdc_pullsUSDC() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
         uint256 gateBefore = usdc.balanceOf(address(gate));
-        _placeUSDC(alice, 11, 10, 2, 2, 2, 1);
+        _placeUsdc(alice, 11, 10, 2, 2, 2, 1);
         assertEq(usdc.balanceOf(address(gate)) - gateBefore, PRICE_USDC);
-    }
-
-    function test_placeTileUSDC_wrongNonce() public {
-        _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        bytes32 badNonce = keccak256("wrong");
-        vm.prank(alice);
-        vm.expectRevert(TruchetGate.WrongNonce.selector);
-        gate.placeTileUSDC(alice, 11, 10, 2, 2, 2, 1, 0, type(uint256).max, badNonce, 0, bytes32(0), bytes32(0));
     }
 
     // ── Gate admin ──────────────────────────────────────────
@@ -320,20 +313,17 @@ contract TruchetNFTTest is Test {
         gate.setOwner(alice);
     }
 
-    function test_gate_setPriceETH() public {
-        gate.setPriceETH(0.01 ether);
-        assertEq(gate.priceETH(), 0.01 ether);
-    }
-
-    function test_gate_setPriceUSDC() public {
-        gate.setPriceUSDC(10e6);
-        assertEq(gate.priceUSDC(), 10e6);
+    function test_gate_setPrices() public {
+        gate.setPrices(0.01 ether, 10e6);
+        (uint256 eth, uint256 usdc) = gate.getPrices();
+        assertEq(eth, 0.01 ether);
+        assertEq(usdc, 10e6);
     }
 
     function test_gate_withdraw() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        _placeETH(alice, 11, 10, 2, 2, 2, 1);
-        _placeUSDC(alice, 10, 11, 2, 2, 2, 2);
+        _placeEth(alice, 11, 10, 2, 2, 2, 1);
+        _placeUsdc(alice, 10, 11, 2, 2, 2, 2);
 
         uint256 ethBefore = address(this).balance;
         uint256 usdcBefore = usdc.balanceOf(address(this));
@@ -349,7 +339,7 @@ contract TruchetNFTTest is Test {
     function test_placeTile_notAdjacent() public {
         _seed(alice, 10, 10, 3, 2, 1, true, 0);
         vm.expectRevert(abi.encodeWithSelector(TruchetNFT.NotAdjacent.selector, uint16(50), uint16(50)));
-        _placeETH(alice, 50, 50, 3, 2, 1, 1);
+        _placeEth(alice, 50, 50, 3, 2, 1, 1);
     }
 
     function test_placeTile_edgeMismatch() public {
@@ -357,7 +347,7 @@ contract TruchetNFTTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(TruchetNFT.EdgeMismatch.selector, uint16(11), uint16(10), uint8(3), uint8(3), uint8(2))
         );
-        _placeETH(alice, 11, 10, 2, 2, 1, 1);
+        _placeEth(alice, 11, 10, 2, 2, 1, 1);
     }
 
     function test_placeTile_multipleNeighbors() public {
@@ -366,7 +356,7 @@ contract TruchetNFTTest is Test {
             2, 2, 2, true, 0,
             2, 2, 2, true, 1);
         // (11,10) neighbors both — both have matching EPs
-        _placeETH(alice, 11, 10, 2, 2, 2, 2);
+        _placeEth(alice, 11, 10, 2, 2, 2, 2);
         assertEq(nft.totalSupply(), 3);
     }
 
@@ -384,12 +374,12 @@ contract TruchetNFTTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(TruchetNFT.EpSumDeltaTooLarge.selector, uint16(11), uint16(10), uint16(10), uint16(3))
         );
-        _placeETH(alice, 11, 10, 3, 5, 5, 1);
+        _placeEth(alice, 11, 10, 3, 5, 5, 1);
     }
 
     function test_placeTile_epSumDeltaWithin2() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        _placeETH(alice, 11, 10, 2, 4, 2, 1);
+        _placeEth(alice, 11, 10, 2, 4, 2, 1);
         assertEq(nft.totalSupply(), 2);
     }
 
@@ -397,14 +387,14 @@ contract TruchetNFTTest is Test {
 
     function test_polarity_evenEp_samePolarity() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
-        _placeETH(alice, 11, 10, 2, 2, 2, 1);
+        _placeEth(alice, 11, 10, 2, 2, 2, 1);
         (, , , bool pol, ,) = nft.getTile(11, 10);
         assertTrue(pol);
     }
 
     function test_polarity_oddEp_flipsPolarity() public {
         _seed(alice, 10, 10, 3, 2, 1, true, 0);
-        _placeETH(alice, 11, 10, 3, 2, 1, 1);
+        _placeEth(alice, 11, 10, 3, 2, 1, 1);
         (, , , bool pol, ,) = nft.getTile(11, 10);
         assertFalse(pol);
     }
@@ -414,7 +404,7 @@ contract TruchetNFTTest is Test {
         _seed2(alice, 10, 10,
             2, 2, 2, true, 0,
             2, 2, 2, true, 1);
-        _placeETH(alice, 11, 10, 2, 2, 2, 2);
+        _placeEth(alice, 11, 10, 2, 2, 2, 2);
         assertEq(nft.totalSupply(), 3);
     }
 
@@ -430,7 +420,7 @@ contract TruchetNFTTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(TruchetNFT.EdgeMismatch.selector, uint16(510), uint16(1), uint8(0), uint8(2), uint8(5))
         );
-        _placeETH(alice, 510, 1, 5, 2, 2, 2);
+        _placeEth(alice, 510, 1, 5, 2, 2, 2);
     }
 
     function test_polarity_mixedFamily_511_0() public {
@@ -442,7 +432,7 @@ contract TruchetNFTTest is Test {
         // Edge 5 → (0,0) axis 2, col crossing, odd→even: fab_nb = (nb.ka+nb.kb)&1 = (2+2)&1 = 0 → no flip → true
         // Edge 0 → (0,1) axis 0, col crossing, odd→even: fab_nb = (nb.ka+nb.kb)&1 = (2+2)&1 = 0 → no flip → true
         // Both agree: positive polarity.
-        _placeETH(alice, 511, 0, 2, 3, 2, 2);
+        _placeEth(alice, 511, 0, 2, 3, 2, 2);
         (, , , bool pol, ,) = nft.getTile(511, 0);
         assertTrue(pol, "(511,0) 2-3-2 next to 2-2-2 neighbors should be positive");
     }
@@ -455,28 +445,28 @@ contract TruchetNFTTest is Test {
         uint8[] memory kcs = new uint8[](3);
         uint128[] memory idxs = new uint128[](3);
         for (uint256 i = 0; i < 3; i++) {
-            kas[i] = 2; kbs[i] = 2; kcs[i] = 2; idxs[i] = uint128(i);
+            kas[i] = 2; kbs[i] = 2; kcs[i] = 2; idxs[i] = uint128((i) & type(uint128).max);
         }
         nft.seedTiles(alice, 0, 0, 3, 1, kas, kbs, kcs, idxs, 0x7);
 
         // Place tiles in order:
-        _placeETH(alice, 0, 511, 2, 2, 2, 3);   // (0,511) 2-2-2 → positive
+        _placeEth(alice, 0, 511, 2, 2, 2, 3);   // (0,511) 2-2-2 → positive
         (, , , bool p0, ,) = nft.getTile(0, 511);
         assertTrue(p0, "(0,511) should be positive");
 
-        _placeETH(alice, 1, 511, 2, 2, 2, 4);   // (1,511) 2-2-2 → positive
+        _placeEth(alice, 1, 511, 2, 2, 2, 4);   // (1,511) 2-2-2 → positive
         (, , , bool p1, ,) = nft.getTile(1, 511);
         assertTrue(p1, "(1,511) should be positive");
 
-        _placeETH(alice, 2, 511, 4, 2, 2, 0);   // (2,511) 4-2-2 → positive
+        _placeEth(alice, 2, 511, 4, 2, 2, 0);   // (2,511) 4-2-2 → positive
         (, , , bool p2, ,) = nft.getTile(2, 511);
         assertTrue(p2, "(2,511) should be positive");
 
-        _placeETH(alice, 1, 510, 4, 2, 2, 1);   // (1,510) 4-2-2 → positive
+        _placeEth(alice, 1, 510, 4, 2, 2, 1);   // (1,510) 4-2-2 → positive
         (, , , bool p3, ,) = nft.getTile(1, 510);
         assertTrue(p3, "(1,510) should be positive");
 
-        _placeETH(alice, 2, 510, 5, 2, 2, 0);   // (2,510) 5-2-2 → should be NEGATIVE
+        _placeEth(alice, 2, 510, 5, 2, 2, 0);   // (2,510) 5-2-2 → should be NEGATIVE
         (, , , bool p4, ,) = nft.getTile(2, 510);
         assertFalse(p4, "(2,510) 5-2-2 should be negative");
     }
@@ -488,12 +478,12 @@ contract TruchetNFTTest is Test {
         uint8[] memory kcs = new uint8[](2);
         uint128[] memory idxs = new uint128[](2);
         for (uint256 i = 0; i < 2; i++) {
-            kas[i] = 2; kbs[i] = 2; kcs[i] = 2; idxs[i] = uint128(i);
+            kas[i] = 2; kbs[i] = 2; kcs[i] = 2; idxs[i] = uint128((i) & type(uint128).max);
         }
         nft.seedTiles(alice, 511, 1, 2, 1, kas, kbs, kcs, idxs, 0x3);
 
         // Place (510,2) as 2-3-2 — should be negative.
-        _placeETH(alice, 510, 2, 2, 3, 2, 0);
+        _placeEth(alice, 510, 2, 2, 3, 2, 0);
         (, , , bool pol, ,) = nft.getTile(510, 2);
         assertTrue(pol, "(510,2) 2-3-2 should be positive");
     }
@@ -504,8 +494,8 @@ contract TruchetNFTTest is Test {
         // Previously reverted with PolarityDeadCell — now allowed since
         // lookahead was removed. Dead cells may exist but aren't prevented.
         _seed(alice, 10, 10, 3, 2, 1, true, 0);
-        _placeETH(alice, 11, 10, 3, 2, 1, 1);
-        _placeETH(alice, 10, 9, 2, 2, 1, 2);
+        _placeEth(alice, 11, 10, 3, 2, 1, 1);
+        _placeEth(alice, 10, 9, 2, 2, 1, 2);
         assertEq(nft.totalSupply(), 3);
     }
 
@@ -631,7 +621,7 @@ contract TruchetNFTTest is Test {
     function test_isCatalanUsed_afterPlace() public {
         _seed(alice, 10, 10, 2, 2, 2, true, 0);
         assertFalse(nft.isCatalanUsed(2, 2, 2, 1));
-        _placeETH(alice, 11, 10, 2, 2, 2, 1);
+        _placeEth(alice, 11, 10, 2, 2, 2, 1);
         assertTrue(nft.isCatalanUsed(2, 2, 2, 1));
     }
 
@@ -669,7 +659,7 @@ contract TruchetNFTTest is Test {
         uint8[] memory kcs = new uint8[](4);
         uint128[] memory idxs = new uint128[](4);
         for (uint256 j = 0; j < 4; j++) {
-            kas[j] = 2; kbs[j] = 2; kcs[j] = 2; idxs[j] = uint128(j);
+            kas[j] = 2; kbs[j] = 2; kcs[j] = 2; idxs[j] = uint128((j) & type(uint128).max);
         }
         nft.seedTiles(alice, 10, 10, 2, 2, kas, kbs, kcs, idxs, 0xF);
 
@@ -710,13 +700,13 @@ contract TruchetNFTTest is Test {
 
     function test_placeTile_epCount_1() public {
         _seed(alice, 10, 10, 2, 1, 1, true, 0);
-        _placeETH(alice, 11, 10, 2, 1, 1, 1);
+        _placeEth(alice, 11, 10, 2, 1, 1, 1);
         assertEq(nft.totalSupply(), 2);
     }
 
     function test_placeTile_epCount_varied() public {
         _seed(alice, 10, 10, 4, 2, 2, true, 0);
-        _placeETH(alice, 11, 10, 4, 2, 2, 1);
+        _placeEth(alice, 11, 10, 4, 2, 2, 1);
         assertEq(nft.totalSupply(), 2);
     }
 }
