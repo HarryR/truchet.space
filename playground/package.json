@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@12.18.0",
   "scripts": {
-    "wasm": "make -C ../solver/c truchet_svg.wasm && cp ../solver/c/truchet_svg.wasm public/truchet_svg.wasm",
+    "wasm": "make -C ../solver/c truchet_svg.wasm && mkdir -p public && cp ../solver/c/truchet_svg.wasm public/truchet_svg.wasm",
     "dev": "pnpm run wasm && vite",
     "build": "pnpm run wasm && tsc && vite build",
     "preview": "vite preview",
