@@ -149,9 +149,9 @@ export class Renderer {
     ctx.strokeStyle = COLORS.frontier
     ctx.stroke(frontier)
 
-    // Hover: only cells that a tap would fill.
+    // Hover: cells a tap acts on (fill an empty one, or regenerate a tile).
     const hov = this.overlay.hovered
-    if (hov && world.canPlace(hov.q, hov.r)) {
+    if (hov && (world.get(hov.q, hov.r) || world.canPlace(hov.q, hov.r))) {
       const [cx, cy] = hexToPixel(layout, hov.uq, hov.ur)
       const p = new Path2D()
       addHex(p, cx, cy, s - 1.5)

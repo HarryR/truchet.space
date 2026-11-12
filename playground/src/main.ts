@@ -36,7 +36,6 @@ const camera = new Camera()
 const renderer = new Renderer(canvas, camera, world, tiles, pool)
 
 const menu = new Menu(document.getElementById('menu')!, {
-  undo() { world.undo() },
   newWorld() {
     if (world.size > 1 && !confirm('Start a new pattern? The current one will be lost.')) return
     world.reset(randomSeed())
@@ -45,7 +44,7 @@ const menu = new Menu(document.getElementById('menu')!, {
   },
 })
 
-const syncMenu = () => menu.update(world.size, world.canUndo)
+const syncMenu = () => menu.update(world.size)
 world.subscribe(syncMenu)
 syncMenu()
 
@@ -73,7 +72,9 @@ renderer.afterDraw = updateHud
 attachInput(canvas, camera, {
   onCamera: () => renderer.request(),
   onTap(cell) {
-    if (world.canPlace(cell.q, cell.r)) world.place(cell.q, cell.r)
+    // Placed tile: re-roll its matching. Empty frontier cell: place one.
+    if (world.get(cell.q, cell.r)) world.regenerate(cell.q, cell.r)
+    else if (world.canPlace(cell.q, cell.r)) world.place(cell.q, cell.r)
   },
   onHover(cell) {
     const prev = renderer.overlay.hovered
@@ -81,13 +82,6 @@ attachInput(canvas, camera, {
     renderer.overlay.hovered = cell
     renderer.request()
   },
-})
-
-window.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-    e.preventDefault()
-    world.undo()
-  }
 })
 
 // ── Start ──

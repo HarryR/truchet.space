@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { catalan } from './catalan'
 import { neighbor } from './hex'
 import { checkPlacement, requiredPolarity, type Eps, type TileLike } from './rules'
 import { World } from './world'
@@ -107,16 +108,26 @@ describe('world', () => {
     expect(w.get(511, 511)).toBeDefined()
   })
 
-  it('tracks the frontier and undoes tile by tile, keeping the first', () => {
+  it('tracks the frontier and regenerates tiles in place', () => {
     const w = new World(2)
     w.reset(2, 10, 10)
     expect(w.frontier().size).toBe(6)
-    expect(w.canUndo).toBe(false)
     tap(w, 30, rng(1))
     expect(w.size).toBe(31)
-    while (w.undo()) { /* all the way back */ }
-    expect(w.size).toBe(1)
-    expect(w.frontier().size).toBe(6)
+    const frontier = w.frontier().size
+    const savedOrder = w.toJSON().tiles.map(([q, r]) => `${q},${r}`)
+    const rand = rng(9)
+    for (const t of [...w.all()]) {
+      const n = w.regenerate(t.q, t.r, rand)!
+      expect(n.idx).not.toBe(t.idx)
+      expect(n.idx).toBeLessThan(catalan(t.ka + t.kb + t.kc))
+      expect({ ...n, idx: t.idx }).toEqual(t) // only the index changes
+      expect(w.get(t.q, t.r)).toBe(n)
+    }
+    expect(w.size).toBe(31)
+    expect(w.frontier().size).toBe(frontier)
+    expect(w.toJSON().tiles.map(([q, r]) => `${q},${r}`)).toEqual(savedOrder)
+    expect(w.regenerate(200, 200)).toBeUndefined()
   })
 
   it.each([3, 4, 5])('seed %i: any tap order works and every tile agrees with its neighbours', (seed) => {

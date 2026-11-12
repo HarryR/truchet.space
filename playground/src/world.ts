@@ -1,6 +1,6 @@
 /**
- * World state: the tiles on the torus, the frontier (empty cells adjacent to
- * a tile) and undo history. DOM-free.
+ * World state: the tiles on the torus and the frontier (empty cells adjacent
+ * to a tile). DOM-free.
  *
  * Every cell's family comes from the world's line rings (see lines.ts), which
  * are derived from `seed`; the only per-tile randomness is the matching index.
@@ -34,8 +34,8 @@ export type ChangeListener = (changed: number[]) => void
 export class World {
   private tiles = new Map<number, Tile>()
   private frontierSet = new Set<number>()
-  /** Placement order; undo pops the last one. */
-  private history: Tile[] = []
+  /** Placement order, so a save can be replayed tile by tile. */
+  private order: Tile[] = []
   private listeners = new Set<ChangeListener>()
   private pendingChanged: number[] = []
   private _seed = 0
@@ -50,8 +50,6 @@ export class World {
 
   get seed(): number { return this._seed }
   get size(): number { return this.tiles.size }
-  /** The first tile is the root of the pattern and can't be undone. */
-  get canUndo(): boolean { return this.history.length > 1 }
 
   all(): IterableIterator<Tile> { return this.tiles.values() }
   frontier(): ReadonlySet<number> { return this.frontierSet }
@@ -78,17 +76,32 @@ export class World {
     if (!res.ok) return res
     const tile: Tile = { q, r, ka: eps[0], kb: eps[1], kc: eps[2], polarity: res.polarity, idx }
     this.insert(tile)
-    this.history.push(tile)
+    this.order.push(tile)
     this.flush()
     return res
   }
 
-  /** Remove the most recently placed tile. */
-  undo(): boolean {
-    if (!this.canUndo) return false
-    this.delete(this.history.pop()!)
+  /**
+   * Re-roll the matching of the tile at (q, r): a new random Catalan index,
+   * always different from the current one. The family and polarity are fixed
+   * by the cell and its neighbours, so the result stays valid. Returns the new
+   * tile, or undefined if the cell is empty.
+   */
+  regenerate(q: number, r: number, rand: () => number = Math.random): Tile | undefined {
+    const k = cellKey(q, r)
+    const old = this.tiles.get(k)
+    if (!old) return undefined
+    const total = catalan(old.ka + old.kb + old.kc)
+    if (total < 2n) return old
+    // Uniform over the other total − 1 indices.
+    let idx = randomBelow(total - 1n, rand)
+    if (idx >= old.idx) idx++
+    const tile: Tile = { ...old, idx }
+    this.tiles.set(k, tile)
+    this.order[this.order.indexOf(old)] = tile
+    this.pendingChanged.push(k)
     this.flush()
-    return true
+    return tile
   }
 
   /** Start over with new line rings and a single tile at (q, r). */
@@ -108,7 +121,7 @@ export class World {
     return {
       version: 2,
       seed: this._seed,
-      tiles: this.history.map(t => [t.q, t.r, t.idx.toString()]),
+      tiles: this.order.map(t => [t.q, t.r, t.idx.toString()]),
     }
   }
 
@@ -134,7 +147,7 @@ export class World {
 
   private clear(seed: number) {
     for (const t of [...this.tiles.values()]) this.delete(t)
-    this.history = []
+    this.order = []
     this._seed = seed
     this.lines = makeLines(seed)
     this.flush()
