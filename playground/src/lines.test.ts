@@ -9,21 +9,25 @@ const key = (q: number, r: number) => (q << 9) | r
 
 describe('line model', () => {
   it('line indices are constant along their line and step by 1 across it', () => {
+    // ~680k checks: collect failures in plain code and assert once, since
+    // per-call expect() overhead alone takes seconds (and timed out on CI).
+    const mod = [HALF, GRID_SIZE, HALF]
+    const bad: string[] = []
     for (let q = 0; q < GRID_SIZE; q++) {
       for (let r = 0; r < GRID_SIZE; r += 7) {
         const me = lineIndex(q, r)
-        const mod = [HALF, GRID_SIZE, HALF]
         for (let e = 0; e < 6; e++) {
           const n = neighbor(q, r, e)
           const nb = lineIndex(n.q, n.r)
           for (let ax = 0; ax < 3; ax++) {
             const d = (nb[ax] - me[ax] + mod[ax]) % mod[ax]
-            if (e % 3 === ax) expect(d).toBe(0)
-            else expect(d === 1 || d === mod[ax] - 1).toBe(true)
+            const ok = e % 3 === ax ? d === 0 : d === 1 || d === mod[ax] - 1
+            if (!ok && bad.length < 10) bad.push(`(${q},${r}) edge ${e} axis ${ax}: step ${d}`)
           }
         }
       }
     }
+    expect(bad).toEqual([])
   })
 
   it.each([1, 2, 3])('seed %i: rings are closed, in range, and the total is even', (seed) => {
