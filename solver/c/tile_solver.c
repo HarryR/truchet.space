@@ -16,13 +16,44 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#ifdef _OPENMP
 #include <omp.h>
+#endif
+
+/* Diagnostics go to stderr, except in builds that must not touch stdio
+ * streams at all (the import-free wasm module defines TRUCHET_NO_DIAG). */
+#ifdef TRUCHET_NO_DIAG
+#define diag(...) ((void)0)
+#else
+#define diag(...) fprintf(stderr, __VA_ARGS__)
+#endif
 
 /* ---------------------------------------------------------------------------
  * Constants
  * ------------------------------------------------------------------------ */
 
 static int g_verbose = 0;
+
+/* Search strategy for picking one variant per arc.
+ *   SEARCH_DP  — (default) exact variable elimination over the pairwise
+ *                conflict graph; falls back to DFS for an attempt if its
+ *                tables get too big.
+ *   SEARCH_DFS — capped parallel backtracking (the original behaviour)
+ * Everything else (levels, rasterisation, compat, AC-3, stroke retry) is
+ * shared, so the two modes differ only in which valid assignment is chosen. */
+enum { SEARCH_DFS = 0, SEARCH_DP = 1 };
+static int g_search_mode = SEARCH_DP;
+
+/* Variant-set knobs (defaults reproduce the reference behaviour).
+ *   g_levels_min — use at least this many quantisation levels per endpoint
+ *                  (0 = auto_tune's choice, which bottoms out at 4)
+ *   g_dmin       — smallest control-point displacement offered (tile units)
+ *   g_dmin_frac  — if > 0, the smallest displacement is additionally capped
+ *                  at this fraction of the arc's own maximum, so short arcs
+ *                  can still be made flatter than their cap */
+static int    g_levels_min = 0;
+static double g_dmin       = 0.05;
+static double g_dmin_frac  = 0.0;
 
 #define MAX_ARCS        64
 #define MAX_EPS         (MAX_ARCS * 2)
@@ -101,6 +132,9 @@ typedef struct {
     double variant_d0[MAX_ARCS * MAX_VARIANTS];
     double variant_d1[MAX_ARCS * MAX_VARIANTS];
     int32_t pixel_counts[MAX_ARCS * MAX_VARIANTS];
+    /* Per-variant pixel bounding box [x0,x1] x [y0,y1] (inclusive); lets
+     * build_compat skip pairs that cannot share a pixel. */
+    int16_t bbox[MAX_ARCS * MAX_VARIANTS][4];
 
     /* Heap-allocated */
     uint64_t *all_packed;    /* [n_arcs * max_variants * pack_len] */
@@ -270,8 +304,9 @@ static void auto_tune(int n_arcs, double min_gap,
 
 static int rasterize_bezier_packed(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3,
                                    int res, int stroke_half, int pack_len,
-                                   uint64_t *out)
+                                   uint64_t *out, int16_t *bbox)
 {
+    int bx0 = res, bx1 = -1, by0 = res, by1 = -1;
     memset(out, 0, pack_len * sizeof(uint64_t));
     int n_samples = res * 4;
     double scale = (double)(res - 1);
@@ -296,10 +331,17 @@ static int rasterize_bezier_packed(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3,
                 int idx = ny * res + nx;
                 if (idx >= 0 && idx < total_bits) {
                     out[idx >> 6] |= 1ULL << (63 - (idx & 63));
+                    if (nx < bx0) bx0 = nx;
+                    if (nx > bx1) bx1 = nx;
+                    if (ny < by0) by0 = ny;
+                    if (ny > by1) by1 = ny;
                 }
             }
         }
     }
+
+    bbox[0] = (int16_t)bx0; bbox[1] = (int16_t)bx1;
+    bbox[2] = (int16_t)by0; bbox[3] = (int16_t)by1;
 
     /* Popcount */
     int count = 0;
@@ -381,7 +423,8 @@ static bool build_all_variants(const ArcGeom *arcs, int n_arcs,
                 uint64_t *slot = &s->all_packed[PACKED_IDX(s, ai, count, 0)];
                 int pixels = rasterize_bezier_packed(a->p0, p1, p2, a->p3,
                                                      bmp_res, stroke_half,
-                                                     s->pack_len, slot);
+                                                     s->pack_len, slot,
+                                                     s->bbox[PIXEL_IDX(ai, count)]);
 
                 /* Score with symmetry penalty */
                 double dd = d0 - d1;
@@ -439,9 +482,19 @@ static void build_compat(SolverState *s)
         int j = pair_j[idx];
 
         for (int vi = 0; vi < s->n_variants[i]; vi++) {
+            const int16_t *bi = s->bbox[PIXEL_IDX(i, vi)];
             for (int vj = 0; vj < s->n_variants[j]; vj++) {
+                const int16_t *bj = s->bbox[PIXEL_IDX(j, vj)];
+                /* Disjoint bounding boxes cannot overlap; otherwise only the
+                 * words covering the shared rows need testing. */
+                int y0 = bi[2] > bj[2] ? bi[2] : bj[2];
+                int y1 = bi[3] < bj[3] ? bi[3] : bj[3];
+                if (y0 > y1 || bi[0] > bj[1] || bj[0] > bi[1]) continue;
+                int w0 = (y0 * s->bmp_res) >> 6;
+                int w1 = (y1 * s->bmp_res + s->bmp_res - 1) >> 6;
+                if (w1 >= pl) w1 = pl - 1;
                 bool overlaps = false;
-                for (int w = 0; w < pl; w++) {
+                for (int w = w0; w <= w1; w++) {
                     if (s->all_packed[PACKED_IDX(s, i, vi, w)] &
                         s->all_packed[PACKED_IDX(s, j, vj, w)]) {
                         overlaps = true;
@@ -712,13 +765,394 @@ static bool parallel_search(SolverState *s, int32_t *out_chosen)
     }
 
     if (g_verbose)
-        fprintf(stderr, "  search: %lld configs, best ink=%lld\n",
+        diag("  search: %lld configs, best ink=%lld\n",
                 (long long)total_found, (long long)best_ink);
 
     free(thread_best);
     free(thread_ink);
     free(thread_count);
     return ok;
+}
+
+/* ---------------------------------------------------------------------------
+ * Exact search by variable elimination (SEARCH_DP)
+ *
+ * Bitmap overlap is a purely pairwise constraint, so the problem is exactly:
+ * maximise sum of per-variant scores subject to the compat table. Arc pairs
+ * with no conflicting viable variants impose no constraint; what remains is a
+ * sparse graph that closely follows the nesting tree. Eliminating one arc at
+ * a time (cheapest table first) and recording the best choice for every
+ * assignment of its remaining neighbours yields the true optimum, or proves
+ * that no assignment exists.
+ *
+ * Returns 1 = solved, 0 = proven infeasible, -1 = gave up (table too large;
+ * dp_search then conditions on one arc and retries, see dp_search_rec).
+ * ------------------------------------------------------------------------ */
+
+#define DP_MAX_SCOPE    10
+#ifndef DP_MAX_TABLE
+#define DP_MAX_TABLE    (1L << 18)
+#endif
+#define DP_MAX_PASSES   4000
+#define DP_NEG          (-(1 << 30))
+
+typedef struct {
+    int nv;
+    int vars[DP_MAX_SCOPE];
+    int32_t *tab;
+} DpFactor;
+
+typedef struct {
+    int x;
+    int nv;
+    int vars[DP_MAX_SCOPE];
+    int16_t *arg;
+} DpStep;
+
+static inline long dp_index(int nv, const int *vars, const int *cur,
+                            const int *dom)
+{
+    long ix = 0;
+    for (int k = 0; k < nv; k++) ix = ix * dom[vars[k]] + cur[vars[k]];
+    return ix;
+}
+
+static int dp_eliminate(const SolverState *s,
+                        const int32_t *vl, const int32_t *nv,
+                        int32_t *out_chosen, int *out_width, int *out_stuck)
+{
+    int n = s->n_arcs;
+    int mv = s->max_variants;
+    *out_width = 0;
+    *out_stuck = -1;
+    if (!s->compat_valid) return -1;
+
+    int dom[MAX_ARCS];
+    for (int i = 0; i < n; i++) dom[i] = nv[i];
+
+    size_t cap = (size_t)MAX_ARCS * (MAX_ARCS - 1) / 2 + MAX_ARCS + 1;
+    DpFactor *F = (DpFactor *)calloc(cap, sizeof(DpFactor));
+    DpStep *steps = (DpStep *)calloc(MAX_ARCS, sizeof(DpStep));
+    int *used = (int *)malloc(cap * sizeof(int));
+    if (!F || !steps || !used) { free(F); free(steps); free(used); return -1; }
+    int nf = 0, ns = 0;
+
+    /* One 0/-inf factor per arc pair that has any conflicting viable pair */
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            bool conflict = false;
+            for (int a = 0; a < dom[i] && !conflict; a++)
+                for (int b = 0; b < dom[j]; b++)
+                    if (!s->compat[COMPAT_IDX(s, i, j,
+                            vl[i * mv + a],
+                            vl[j * mv + b])]) {
+                        conflict = true;
+                        break;
+                    }
+            if (!conflict) continue;
+            DpFactor *f = &F[nf++];
+            f->nv = 2; f->vars[0] = i; f->vars[1] = j;
+            f->tab = (int32_t *)malloc(sizeof(int32_t) * (size_t)dom[i] * (size_t)dom[j]);
+            for (int a = 0; a < dom[i]; a++)
+                for (int b = 0; b < dom[j]; b++)
+                    f->tab[a * dom[j] + b] =
+                        s->compat[COMPAT_IDX(s, i, j,
+                            vl[i * mv + a],
+                            vl[j * mv + b])] ? 0 : DP_NEG;
+        }
+    }
+
+    bool eliminated[MAX_ARCS] = {0};
+    int cur[MAX_ARCS];
+    memset(cur, 0, sizeof(cur));
+    int rc = 1;
+
+    for (int it = 0; it < n && rc == 1; it++) {
+        /* Choose the arc whose elimination builds the smallest table */
+        int bx = -1, bsn = 0, bscope[MAX_ARCS];
+        double bcost = 1e300;
+        for (int x = 0; x < n; x++) {
+            if (eliminated[x]) continue;
+            bool in[MAX_ARCS] = {0};
+            int sc[MAX_ARCS], deg = 0;
+            double cost = dom[x];
+            for (int k = 0; k < nf; k++) {
+                if (!F[k].tab) continue;
+                bool has = false;
+                for (int q = 0; q < F[k].nv; q++)
+                    if (F[k].vars[q] == x) has = true;
+                if (!has) continue;
+                for (int q = 0; q < F[k].nv; q++) {
+                    int v = F[k].vars[q];
+                    if (v != x && !in[v]) {
+                        in[v] = true; sc[deg++] = v; cost *= dom[v];
+                    }
+                }
+            }
+            if (cost < bcost) {
+                bcost = cost; bx = x; bsn = deg;
+                memcpy(bscope, sc, deg * sizeof(int));
+            }
+        }
+        int x = bx;
+        if (bsn > *out_width) *out_width = bsn;
+        long size = 1;
+        if (bsn <= DP_MAX_SCOPE && bcost <= (double)DP_MAX_TABLE * 32)
+            for (int k = 0; k < bsn; k++) size *= dom[bscope[k]];
+        else
+            size = DP_MAX_TABLE + 1;
+        if (size > DP_MAX_TABLE) {
+            /* Too big: report the widest-domain arc involved so the caller
+             * can fix its variant and retry. */
+            int stuck = x;
+            for (int k = 0; k < bsn; k++)
+                if (dom[bscope[k]] > dom[stuck]) stuck = bscope[k];
+            *out_stuck = stuck;
+            rc = -1; break;
+        }
+
+        int nu = 0;
+        for (int k = 0; k < nf; k++) {
+            if (!F[k].tab) continue;
+            for (int q = 0; q < F[k].nv; q++)
+                if (F[k].vars[q] == x) { used[nu++] = k; break; }
+        }
+
+        int32_t *tab = (int32_t *)malloc(sizeof(int32_t) * size);
+        DpStep *sp = &steps[ns++];
+        sp->x = x; sp->nv = bsn;
+        memcpy(sp->vars, bscope, bsn * sizeof(int));
+        sp->arg = (int16_t *)malloc(sizeof(int16_t) * size);
+        if (!tab || !sp->arg) { free(tab); rc = -1; break; }
+
+        for (int k = 0; k < bsn; k++) cur[bscope[k]] = 0;
+        for (long ix = 0; ix < size; ix++) {
+            int32_t best = DP_NEG;
+            int best_a = -1;
+            /* viable_lists is sorted by descending score, so on ties the
+             * individually-best variant wins */
+            for (int a = 0; a < dom[x]; a++) {
+                cur[x] = a;
+                int32_t v = s->pixel_counts[
+                    PIXEL_IDX(x, vl[x * mv + a])];
+                bool bad = false;
+                for (int u = 0; u < nu; u++) {
+                    const DpFactor *f = &F[used[u]];
+                    int32_t t = f->tab[dp_index(f->nv, f->vars, cur, dom)];
+                    if (t <= DP_NEG) { bad = true; break; }
+                    v += t;
+                }
+                if (!bad && (best_a < 0 || v > best)) { best = v; best_a = a; }
+            }
+            tab[ix] = best_a < 0 ? DP_NEG : best;
+            sp->arg[ix] = (int16_t)best_a;
+            /* mixed-radix increment, last var fastest (matches dp_index) */
+            for (int k = bsn - 1; k >= 0; k--) {
+                if (++cur[bscope[k]] < dom[bscope[k]]) break;
+                cur[bscope[k]] = 0;
+            }
+        }
+
+        for (int u = 0; u < nu; u++) {
+            free(F[used[u]].tab);
+            F[used[u]].tab = NULL;
+        }
+        eliminated[x] = true;
+
+        if (bsn == 0) {
+            if (tab[0] <= DP_NEG) rc = 0;
+            free(tab);
+        } else {
+            DpFactor *f = &F[nf++];
+            f->nv = bsn;
+            memcpy(f->vars, bscope, bsn * sizeof(int));
+            f->tab = tab;
+        }
+    }
+
+    if (rc == 1) {
+        /* Back-substitute in reverse elimination order */
+        for (int k = ns - 1; k >= 0; k--) {
+            const DpStep *sp = &steps[k];
+            cur[sp->x] = sp->arg[dp_index(sp->nv, sp->vars, cur, dom)];
+        }
+        for (int i = 0; i < n; i++)
+            out_chosen[i] = vl[i * mv + cur[i]];
+    }
+
+    for (int k = 0; k < nf; k++) free(F[k].tab);
+    for (int k = 0; k < ns; k++) free(steps[k].arg);
+    free(F); free(steps); free(used);
+    return rc;
+}
+
+/* Arc consistency on explicit variant lists: drop any variant that has no
+ * compatible partner left in some other arc. Returns false on a wipe-out
+ * (an arc with no variants left = no solution in this branch). */
+static bool dp_arc_consistency(const SolverState *s, int32_t *vl, int32_t *nv)
+{
+    int n = s->n_arcs, mv = s->max_variants;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 0; i < n; i++) {
+            int kept = 0;
+            for (int a = 0; a < nv[i]; a++) {
+                int va = vl[i * mv + a];
+                bool ok = true;
+                for (int j = 0; j < n && ok; j++) {
+                    if (j == i) continue;
+                    bool support = false;
+                    for (int b = 0; b < nv[j]; b++)
+                        if (s->compat[COMPAT_IDX(s, i, j, va, vl[j * mv + b])]) {
+                            support = true;
+                            break;
+                        }
+                    ok = support;
+                }
+                if (ok) vl[i * mv + kept++] = va;
+                else changed = true;
+            }
+            nv[i] = kept;
+            if (kept == 0) return false;
+        }
+    }
+    return true;
+}
+
+static void dp_prune_dominated(const SolverState *s, int32_t *vl, int32_t *nv);
+
+/* Exact search with conditioning: when elimination would need an oversized
+ * table, fix one arc's variant at a time (which removes it from every table)
+ * and take the best branch. Each branch is re-propagated (arc consistency +
+ * dominance), which usually collapses the neighbouring arcs' choices too.
+ * Still exact; `budget` bounds the total number of elimination passes so a
+ * pathological tile falls back to DFS instead. */
+static int dp_search_rec(const SolverState *s,
+                         const int32_t *vl, const int32_t *nv,
+                         int32_t *out_chosen, long long *out_score,
+                         int *out_width, int *budget)
+{
+    int n = s->n_arcs, mv = s->max_variants;
+    int width = 0, stuck = -1;
+    if (--(*budget) < 0) return -1;
+    int rc = dp_eliminate(s, vl, nv, out_chosen, &width, &stuck);
+    if (width > *out_width) *out_width = width;
+    if (rc == 1) {
+        long long score = 0;
+        for (int i = 0; i < n; i++)
+            score += s->pixel_counts[PIXEL_IDX(i, out_chosen[i])];
+        *out_score = score;
+    }
+    if (rc >= 0 || stuck < 0 || nv[stuck] <= 1) return rc;
+
+    int32_t *vl2 = (int32_t *)malloc((size_t)n * mv * sizeof(int32_t));
+    int32_t nv2[MAX_ARCS], cand[MAX_ARCS];
+    if (!vl2) return -1;
+
+    int result = 0;
+    for (int a = 0; a < nv[stuck]; a++) {
+        memcpy(vl2, vl, (size_t)n * mv * sizeof(int32_t));
+        memcpy(nv2, nv, n * sizeof(int32_t));
+        nv2[stuck] = 1;
+        vl2[stuck * mv] = vl[stuck * mv + a];
+        if (!dp_arc_consistency(s, vl2, nv2)) continue;
+        dp_prune_dominated(s, vl2, nv2);
+        long long score = 0;
+        int r = dp_search_rec(s, vl2, nv2, cand, &score, out_width, budget);
+        if (r < 0) { result = -1; break; }
+        if (r == 1 && (result == 0 || score > *out_score)) {
+            result = 1;
+            *out_score = score;
+            memcpy(out_chosen, cand, n * sizeof(int32_t));
+        }
+    }
+    free(vl2);
+    return result;
+}
+
+/* Dominance pruning. Variant `a` of an arc is redundant if an earlier (so
+ * equal-or-better scoring) variant `b` of the same arc is compatible with
+ * everything `a` is compatible with: any solution using `a` stays valid and
+ * no worse with `b`. Removing such variants never loses the optimum and
+ * shrinks the tables the elimination has to build. */
+static void dp_prune_dominated(const SolverState *s, int32_t *vl, int32_t *nv)
+{
+    int n = s->n_arcs, mv = s->max_variants;
+    bool *adj = (bool *)calloc((size_t)n * n, 1);
+    if (!adj) return;
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++) {
+            bool conflict = false;
+            for (int a = 0; a < nv[i] && !conflict; a++)
+                for (int b = 0; b < nv[j]; b++)
+                    if (!s->compat[COMPAT_IDX(s, i, j, vl[i * mv + a],
+                                              vl[j * mv + b])]) {
+                        conflict = true;
+                        break;
+                    }
+            adj[i * n + j] = adj[j * n + i] = conflict;
+        }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int x = 0; x < n; x++) {
+            int kept = 0;
+            for (int a = 0; a < nv[x]; a++) {
+                int va = vl[x * mv + a];
+                bool dominated = false;
+                for (int b = 0; b < kept && !dominated; b++) {
+                    int vb = vl[x * mv + b];
+                    bool covers = true;
+                    for (int j = 0; j < n && covers; j++) {
+                        if (!adj[x * n + j]) continue;
+                        for (int c = 0; c < nv[j]; c++) {
+                            int vc = vl[j * mv + c];
+                            if (s->compat[COMPAT_IDX(s, x, j, va, vc)] &&
+                                !s->compat[COMPAT_IDX(s, x, j, vb, vc)]) {
+                                covers = false;
+                                break;
+                            }
+                        }
+                    }
+                    dominated = covers;
+                }
+                if (dominated) changed = true;
+                else vl[x * mv + kept++] = va;
+            }
+            nv[x] = kept;
+        }
+    }
+    free(adj);
+}
+
+static int dp_search(const SolverState *s, int32_t *out_chosen, int *out_width)
+{
+    int n = s->n_arcs, mv = s->max_variants;
+    long long score = 0;
+    int budget = DP_MAX_PASSES;
+    *out_width = 0;
+    if (!s->compat_valid) return -1;
+
+    int32_t *vl = (int32_t *)malloc((size_t)n * mv * sizeof(int32_t));
+    int32_t nv[MAX_ARCS];
+    if (!vl) return -1;
+    memcpy(vl, s->viable_lists, (size_t)n * mv * sizeof(int32_t));
+    memcpy(nv, s->n_viable, n * sizeof(int32_t));
+    dp_prune_dominated(s, vl, nv);
+    if (g_verbose) {
+        int before = 0, after = 0;
+        for (int i = 0; i < n; i++) { before += s->n_viable[i]; after += nv[i]; }
+        diag("  dp: dominance pruning %d -> %d variants\n",
+                before, after);
+    }
+
+    int rc = dp_search_rec(s, vl, nv, out_chosen, &score, out_width, &budget);
+    if (g_verbose)
+        diag("  dp: %d elimination passes\n", DP_MAX_PASSES - budget);
+    free(vl);
+    return rc;
 }
 
 /* ---------------------------------------------------------------------------
@@ -735,7 +1169,7 @@ bool solve_tile(const SolverInput *input, SolverResult *result)
         return true;
     }
     if (input->n_arcs > MAX_ARCS) {
-        fprintf(stderr, "Too many arcs: %d > %d\n", input->n_arcs, MAX_ARCS);
+        diag("Too many arcs: %d > %d\n", input->n_arcs, MAX_ARCS);
         return false;
     }
 
@@ -771,25 +1205,39 @@ bool solve_tile(const SolverInput *input, SolverResult *result)
                                      input->n_eps);
     int n_levels, bmp_res, stroke_width;
     auto_tune(n_arcs, min_gap, &n_levels, &bmp_res, &stroke_width);
+    if (g_levels_min > n_levels) n_levels = g_levels_min;
+    if (n_levels > MAX_LEVELS - 1) n_levels = MAX_LEVELS - 1;
 
     if (g_verbose)
-        fprintf(stderr, "  auto-tune: %d arcs, min_gap=%.3f, levels=%d, "
+        diag("  auto-tune: %d arcs, min_gap=%.3f, levels=%d, "
                 "res=%d, stroke=%dpx (%.1f%%)\n",
                 n_arcs, min_gap, n_levels, bmp_res, stroke_width,
                 (double)stroke_width / bmp_res * 100.0);
+
+    /* Working state is ~1.5 MB: keep it off the stack (small wasm stacks) */
+    SolverState *state = (SolverState *)malloc(sizeof(SolverState));
+    if (!state) return false;
 
     /* Retry loop: reduce stroke on failure */
     for (int attempt = 0; attempt < stroke_width; attempt++) {
         int sw = stroke_width - attempt;
         if (sw < 1) break;
+        /* The brush is 2*(sw/2)+1 px wide, so sw and sw+1 can rasterise
+         * identically; that attempt already failed, don't repeat it. */
+        if (attempt > 0 && sw / 2 == (sw + 1) / 2) continue;
 
         /* Compute d levels for this attempt */
         int max_v = 0;
         for (int ai = 0; ai < n_arcs; ai++) {
             ArcGeom *g = &arcs[ai];
-            g->n_levels_0 = compute_d_levels(g->d_ideal, n_levels, 0.05,
+            double dmin0 = g_dmin, dmin1 = g_dmin;
+            if (g_dmin_frac > 0) {
+                if (g_dmin_frac * g->d0_max < dmin0) dmin0 = g_dmin_frac * g->d0_max;
+                if (g_dmin_frac * g->d1_max < dmin1) dmin1 = g_dmin_frac * g->d1_max;
+            }
+            g->n_levels_0 = compute_d_levels(g->d_ideal, n_levels, dmin0,
                                               g->d0_max, g->levels_0);
-            g->n_levels_1 = compute_d_levels(g->d_ideal, n_levels, 0.05,
+            g->n_levels_1 = compute_d_levels(g->d_ideal, n_levels, dmin1,
                                               g->d1_max, g->levels_1);
             int nv = g->n_levels_0 * g->n_levels_1;
             if (nv > max_v) max_v = nv;
@@ -797,68 +1245,92 @@ bool solve_tile(const SolverInput *input, SolverResult *result)
         if (max_v > MAX_VARIANTS) max_v = MAX_VARIANTS;
 
         /* Allocate state */
-        SolverState state;
-        if (!solver_state_init(&state, n_arcs, max_v, bmp_res)) {
-            if (g_verbose) fprintf(stderr, "  allocation failed\n");
+        if (!solver_state_init(state, n_arcs, max_v, bmp_res)) {
+            if (g_verbose) diag("  allocation failed\n");
             continue;
         }
 
         if (g_verbose)
-            fprintf(stderr, "  attempt %d: stroke=%dpx, max_variants=%d\n",
+            diag("  attempt %d: stroke=%dpx, max_variants=%d\n",
                     attempt, sw, max_v);
 
         /* Build variants */
         if (!build_all_variants(arcs, n_arcs, bmp_res, sw,
-                                input->edge_normals, &state)) {
+                                input->edge_normals, state)) {
             if (g_verbose)
-                fprintf(stderr, "  no valid variants, reducing stroke...\n");
-            solver_state_free(&state);
+                diag("  no valid variants, reducing stroke...\n");
+            solver_state_free(state);
             continue;
         }
 
         /* Compat + AC-3 */
-        build_compat(&state);
-        ac3_eliminate(&state);
-        build_viable_lists(&state);
+        build_compat(state);
+        ac3_eliminate(state);
+        build_viable_lists(state);
 
         /* Check viability */
         bool any_empty = false;
         for (int i = 0; i < n_arcs; i++) {
-            if (state.n_viable[i] == 0) {
+            if (state->n_viable[i] == 0) {
                 if (g_verbose)
-                    fprintf(stderr, "  WARNING: arc %d has no viable variants "
+                    diag("  WARNING: arc %d has no viable variants "
                             "after AC-3\n", i);
                 any_empty = true;
             }
         }
 
         if (any_empty) {
-            solver_state_free(&state);
+            solver_state_free(state);
             continue;
         }
 
         /* Search */
         int32_t chosen[MAX_ARCS];
-        if (parallel_search(&state, chosen)) {
+        bool found = false;
+        const char *used_mode = "dfs";
+        if (g_search_mode == SEARCH_DP) {
+            int width = 0;
+            int rc = dp_search(state, chosen, &width);
+            if (g_verbose)
+                diag("  dp: %s, width=%d\n",
+                        rc == 1 ? "solved" : rc == 0 ? "infeasible"
+                                                     : "gave up -> dfs",
+                        width);
+            if (rc >= 0) { found = (rc == 1); used_mode = "dp"; }
+            else found = parallel_search(state, chosen);
+        } else {
+            found = parallel_search(state, chosen);
+        }
+
+        if (found) {
+            if (g_verbose) {
+                long long score = 0;
+                for (int ai = 0; ai < n_arcs; ai++)
+                    score += state->pixel_counts[PIXEL_IDX(ai, chosen[ai])];
+                diag("  result: mode=%s stroke=%dpx score=%lld\n",
+                        used_mode, sw, score);
+            }
             /* Extract results */
             for (int ai = 0; ai < n_arcs; ai++) {
                 int vi = chosen[ai];
-                result->d0[ai] = state.variant_d0[PIXEL_IDX(ai, vi)];
-                result->d1[ai] = state.variant_d1[PIXEL_IDX(ai, vi)];
+                result->d0[ai] = state->variant_d0[PIXEL_IDX(ai, vi)];
+                result->d1[ai] = state->variant_d1[PIXEL_IDX(ai, vi)];
                 const ArcGeom *a = &arcs[ai];
                 result->d0_idx[ai] = vi / a->n_levels_1;
                 result->d1_idx[ai] = vi % a->n_levels_1;
             }
             result->ok = true;
-            solver_state_free(&state);
+            solver_state_free(state);
+            free(state);
             return true;
         }
 
         if (g_verbose)
-            fprintf(stderr, "  no solution, reducing stroke...\n");
-        solver_state_free(&state);
+            diag("  no solution, reducing stroke...\n");
+        solver_state_free(state);
     }
 
+    free(state);
     return false;
 }
 
@@ -885,7 +1357,7 @@ int main(int argc, char **argv)
 {
     int n_eps, n_edges, n_corners, n_arcs;
     if (scanf("%d %d %d %d", &n_eps, &n_edges, &n_corners, &n_arcs) != 4) {
-        fprintf(stderr, "Expected: n_eps n_edges n_corners n_arcs\n");
+        diag("Expected: n_eps n_edges n_corners n_arcs\n");
         return 1;
     }
 
@@ -926,7 +1398,7 @@ int main(int argc, char **argv)
             printf("%.6f %.6f\n", result.d0[i], result.d1[i]);
         }
     } else {
-        fprintf(stderr, "FAILED: no solution found\n");
+        diag("FAILED: no solution found\n");
         free(positions); free(edge_indices); free(normals);
         free(corners); free(matching);
         return 1;

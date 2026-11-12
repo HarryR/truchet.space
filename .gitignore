@@ -1,2 +1,5 @@
 .pnpm-store
 .claude
+experiments
+.git.corrupt
+PLAN.md

@@ -1,3 +1,5 @@
 truchet
 truchet.opt
 backup
+*.wasm
+zig/

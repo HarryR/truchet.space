@@ -1,20 +1,20 @@
 {
   "name": "Truchet.Space",
   "build": {
-    "dockerfile": "Dockerfile"
+    "dockerfile": "Dockerfile",
+    "options": [
+      "--network=host"
+    ]
   },
-  "runArgs": ["--network=host"],
+  "runArgs": [
+    "--network=host"
+  ],
   "features": {
-    "ghcr.io/devcontainers/features/node:1": {
-      "version": "22",
-      "installYarnUsingApt": false
-    },
-    "ghcr.io/devcontainers/features/python:1": {
-      "version": "3.12"
+    "ghcr.io/devcontainers/features/node:2": {
+      "version": "24"
     },
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
   },
-  "postCreateCommand": "corepack enable && corepack prepare pnpm@latest --activate",
   "customizations": {
     "vscode": {
       "extensions": [

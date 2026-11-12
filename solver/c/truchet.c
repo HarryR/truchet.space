@@ -550,7 +550,7 @@ static bool solve_one_tile(const TileDesc *desc, Rng *rng, SolvedTile *out,
             return true;
         }
         if (g_verbose)
-            fprintf(stderr, "  tile (%d,%d) retry %d: matching failed, re-rolling...\n",
+            diag("  tile (%d,%d) retry %d: matching failed, re-rolling...\n",
                     desc->row, desc->col, retry + 1);
     }
     return false;
@@ -830,8 +830,10 @@ static int valid_splits_hexagon(int total, Split3 *out)
 /* Main                                                                      */
 /* ========================================================================= */
 
+#ifndef TRUCHET_NO_MAIN
+
 static void print_usage(void) {
-    fprintf(stderr,
+    diag(
         "Usage: truchet [options]\n"
         "\n"
         "  w=COLS      Grid columns (default: 6)\n"
@@ -844,6 +846,11 @@ static void print_usage(void) {
         "  idx=N       Catalan index for a specific matching (use with w=1 h=1)\n"
         "  pos=C,R     Grid position offset for polarity (default: 0,0)\n"
         "  polarity=N  Override polarity: 0 or 1 (for single-tile rendering)\n"
+        "  search=MODE dp:  exact elimination over the conflict graph (default)\n"
+        "              dfs: capped backtracking (the original search)\n"
+        "  levels=N    Use at least N displacement levels per endpoint (default: auto, min 4)\n"
+        "  dmin=F      Smallest control-point displacement offered (default: 0.05)\n"
+        "  dminfrac=F  Also cap the smallest displacement at F x the arc's maximum (default: off)\n"
         "\n"
         "  svg[=FILE]  Write SVG (bare: stdout, =FILE: file, =-: stdout)\n"
         "  json[=FILE] Write JSON (bare: stdout, =FILE: file, =-: stdout)\n"
@@ -890,7 +897,7 @@ int main(int argc, char **argv)
             if (strcmp(arg, "h") == 0 || strcmp(arg, "help") == 0) {
                 print_usage(); return 0;
             }
-            fprintf(stderr, "Unknown flag: %s\n", argv[i]);
+            diag("Unknown flag: %s\n", argv[i]);
             print_usage();
             return 1;
         }
@@ -915,8 +922,19 @@ int main(int argc, char **argv)
         else if (strcmp(key, "pos") == 0)   val_pos = val;
         else if (strcmp(key, "polarity") == 0) val_polarity = val;
         else if (strcmp(key, "minter") == 0) val_minter = val;
+        else if (strcmp(key, "levels") == 0)   g_levels_min = atoi(val);
+        else if (strcmp(key, "dmin") == 0)     g_dmin = atof(val);
+        else if (strcmp(key, "dminfrac") == 0) g_dmin_frac = atof(val);
+        else if (strcmp(key, "search") == 0) {
+            if (strcmp(val, "dfs") == 0)      g_search_mode = SEARCH_DFS;
+            else if (strcmp(val, "dp") == 0)  g_search_mode = SEARCH_DP;
+            else {
+                diag("search= must be dfs or dp\n");
+                return 1;
+            }
+        }
         else {
-            fprintf(stderr, "Unknown key: %s\n", key);
+            diag("Unknown key: %s\n", key);
             print_usage();
             return 1;
         }
@@ -932,7 +950,7 @@ int main(int argc, char **argv)
     uint64_t seed = val_seed ? (uint64_t)atoll(val_seed) : (uint64_t)time(NULL);
 
     if (val_ep && val_eps) {
-        fprintf(stderr, "Cannot specify both ep= and eps=\n");
+        diag("Cannot specify both ep= and eps=\n");
         return 1;
     }
 
@@ -946,7 +964,7 @@ int main(int argc, char **argv)
     else if (strcmp(shape_name, "triangle") == 0)  n_shape_edges = 3;
     else if (strcmp(shape_name, "hexagon") == 0)   n_shape_edges = 3;
     else {
-        fprintf(stderr, "Unknown shape: %s. Use square, triangle, or hexagon.\n",
+        diag("Unknown shape: %s. Use square, triangle, or hexagon.\n",
                 shape_name);
         return 1;
     }
@@ -964,7 +982,7 @@ int main(int argc, char **argv)
         }
         if (tok) n_vals++;  /* too many */
         if (n_vals != n_shape_edges) {
-            fprintf(stderr, "eps= for %s needs %d values, got %d\n",
+            diag("eps= for %s needs %d values, got %d\n",
                     shape_name, n_shape_edges, n_vals);
             return 1;
         }
@@ -975,7 +993,7 @@ int main(int argc, char **argv)
         else if (strcmp(shape_name, "hexagon") == 0)
             total_eps *= 2;  /* hexagon: [ka,kb,kc,ka,kb,kc] */
         if (total_eps % 2 != 0) {
-            fprintf(stderr, "eps= total %d is odd — must be even for 2-colorability.\n",
+            diag("eps= total %d is odd — must be even for 2-colorability.\n",
                     total_eps);
             return 1;
         }
@@ -983,14 +1001,14 @@ int main(int argc, char **argv)
     } else {
         total_eps = val_ep ? atoi(val_ep) : 4;
         if (total_eps % 2 != 0) {
-            fprintf(stderr, "ep=%d is odd — must be even for 2-colorability.\n",
+            diag("ep=%d is odd — must be even for 2-colorability.\n",
                     total_eps);
             return 1;
         }
     }
 
     if (total_eps > MAX_EPS) {
-        fprintf(stderr, "total_eps=%d exceeds MAX_EPS=%d (MAX_ARCS=%d).\n"
+        diag("total_eps=%d exceeds MAX_EPS=%d (MAX_ARCS=%d).\n"
                 "Recompile with a larger MAX_ARCS.\n",
                 total_eps, MAX_EPS, MAX_ARCS);
         return 1;
@@ -1003,7 +1021,7 @@ int main(int argc, char **argv)
         posbuf[sizeof(posbuf) - 1] = '\0';
         char *comma = strchr(posbuf, ',');
         if (!comma) {
-            fprintf(stderr, "pos= needs two values: pos=C,R\n");
+            diag("pos= needs two values: pos=C,R\n");
             return 1;
         }
         *comma = '\0';
@@ -1017,7 +1035,7 @@ int main(int argc, char **argv)
     int max_tiles = rows * cols;
     TileDesc *descs = (TileDesc *)calloc(max_tiles, sizeof(TileDesc));
     SolvedTile *solved = (SolvedTile *)calloc(max_tiles, sizeof(SolvedTile));
-    if (!descs || !solved) { fprintf(stderr, "alloc failed\n"); return 1; }
+    if (!descs || !solved) { diag("alloc failed\n"); return 1; }
 
     int n_tiles = 0;
     char out_name[256];
@@ -1035,7 +1053,7 @@ int main(int argc, char **argv)
             Split3 *interesting = (Split3 *)malloc(max_splits * sizeof(Split3));
             __uint128_t *weights = (__uint128_t *)malloc(max_splits * sizeof(__uint128_t));
             if (!splits || !interesting || !weights) {
-                fprintf(stderr, "alloc failed\n"); return 1;
+                diag("alloc failed\n"); return 1;
             }
             int n_splits = valid_splits_square(total_eps, splits);
             int ni = 0;
@@ -1054,10 +1072,10 @@ int main(int argc, char **argv)
         }
 
         if (!g_quiet)
-            fprintf(stderr, "Grid: %dx%d squares, %d EPs/tile, edge config [%d,%d,%d,%d]\n",
+            diag("Grid: %dx%d squares, %d EPs/tile, edge config [%d,%d,%d,%d]\n",
                     rows, cols, total_eps, k1, k2, k1, k2);
         if (g_verbose)
-            fprintf(stderr, "  split: k1=%d (horiz), k2=%d (vert)\n", k1, k2);
+            diag("  split: k1=%d (horiz), k2=%d (vert)\n", k1, k2);
 
         n_tiles = square_grid(rows, cols, k1, k2, 80.0, descs, pos_col, pos_row);
         snprintf(out_name, sizeof(out_name), "compose_square_%d_%d.svg", k1, k2);
@@ -1073,7 +1091,7 @@ int main(int argc, char **argv)
             Split3 *interesting = (Split3 *)malloc(max_splits * sizeof(Split3));
             __uint128_t *weights = (__uint128_t *)malloc(max_splits * sizeof(__uint128_t));
             if (!splits || !interesting || !weights) {
-                fprintf(stderr, "alloc failed\n"); return 1;
+                diag("alloc failed\n"); return 1;
             }
             int n_splits = valid_splits_triangle(total_eps, splits);
             int ni = 0;
@@ -1101,7 +1119,7 @@ int main(int argc, char **argv)
         }
 
         if (!g_quiet)
-            fprintf(stderr, "Grid: %dx%d triangles, %d EPs/tile, edge config [%d,%d,%d]\n",
+            diag("Grid: %dx%d triangles, %d EPs/tile, edge config [%d,%d,%d]\n",
                     rows, cols, total_eps, k0, k1, k2);
 
         n_tiles = triangle_grid(rows, cols, k0, k1, k2, 80.0, descs, pos_col, pos_row);
@@ -1118,7 +1136,7 @@ int main(int argc, char **argv)
             Split3 *interesting = (Split3 *)malloc(max_splits * sizeof(Split3));
             __uint128_t *weights = (__uint128_t *)malloc(max_splits * sizeof(__uint128_t));
             if (!splits || !interesting || !weights) {
-                fprintf(stderr, "alloc failed\n"); return 1;
+                diag("alloc failed\n"); return 1;
             }
             int n_splits = valid_splits_hexagon(total_eps, splits);
             int ni = 0;
@@ -1146,7 +1164,7 @@ int main(int argc, char **argv)
         }
 
         if (!g_quiet)
-            fprintf(stderr, "Grid: %dx%d hexagons, %d EPs/tile, edge config [%d,%d,%d,%d,%d,%d]\n",
+            diag("Grid: %dx%d hexagons, %d EPs/tile, edge config [%d,%d,%d,%d,%d,%d]\n",
                     rows, cols, total_eps, ka, kb, kc, ka, kb, kc);
 
         n_tiles = hexagon_grid(rows, cols, ka, kb, kc, 80.0, descs, pos_col, pos_row);
@@ -1154,7 +1172,7 @@ int main(int argc, char **argv)
         edge_eps_config[0] = ka; edge_eps_config[1] = kb; edge_eps_config[2] = kc; n_edge_vals = 3;
 
     } else {
-        fprintf(stderr, "Unknown shape: %s. Use square, triangle, or hexagon.\n",
+        diag("Unknown shape: %s. Use square, triangle, or hexagon.\n",
                 shape_name);
         return 1;
     }
@@ -1170,7 +1188,7 @@ int main(int argc, char **argv)
     if (g_verbose) {
         char cat_str[40];
         uint128_to_str(cat_str, n_matchings);
-        fprintf(stderr, "  C(%d) = %s matchings\n", total_eps / 2, cat_str);
+        diag("  C(%d) = %s matchings\n", total_eps / 2, cat_str);
     }
 
     bool has_idx = (val_idx != NULL);
@@ -1180,20 +1198,20 @@ int main(int argc, char **argv)
         if (fixed_idx >= n_matchings) {
             char cat_str[40];
             uint128_to_str(cat_str, n_matchings);
-            fprintf(stderr, "idx=%s out of range — must be < C(%d) = %s\n",
+            diag("idx=%s out of range — must be < C(%d) = %s\n",
                     val_idx, total_eps / 2, cat_str);
             return 1;
         }
     }
 
     /* Solve all tiles */
-    if (!g_quiet) fprintf(stderr, "Solving %d tiles...\n", n_tiles);
+    if (!g_quiet) diag("Solving %d tiles...\n", n_tiles);
     struct timespec t0, t1, tnow;
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
     for (int i = 0; i < n_tiles; i++) {
         if (!solve_one_tile(&descs[i], &rng, &solved[i], has_idx, fixed_idx)) {
-            fprintf(stderr, "\nFATAL: tile (%d,%d) failed after %d retries. "
+            diag("\nFATAL: tile (%d,%d) failed after %d retries. "
                     "Cannot produce valid output.\n",
                     descs[i].row, descs[i].col, MAX_MATCHING_RETRIES);
             free(descs); free(solved);
@@ -1206,7 +1224,7 @@ int main(int argc, char **argv)
                            + (tnow.tv_nsec - t0.tv_nsec) * 1e-9;
             double per_tile = elapsed / (i + 1);
             double eta = per_tile * (n_tiles - i - 1);
-            fprintf(stderr, "\r  tile %d/%d  %.2fs  ETA %.1fs  ", i + 1, n_tiles,
+            diag("\r  tile %d/%d  %.2fs  ETA %.1fs  ", i + 1, n_tiles,
                     elapsed, eta);
         }
     }
@@ -1215,7 +1233,7 @@ int main(int argc, char **argv)
     double total_time = (t1.tv_sec - t0.tv_sec)
                       + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
     if (!g_quiet)
-        fprintf(stderr, "\r  solved %d tiles in %.2fs              \n", n_tiles,
+        diag("\r  solved %d tiles in %.2fs              \n", n_tiles,
                 total_time);
 
     /* If neither svg= nor json= specified, default to SVG auto-named file */
@@ -1224,27 +1242,29 @@ int main(int argc, char **argv)
     /* Compute n_levels for metadata (grid-level constant) */
     int out_n_levels, out_res, out_stroke;
     auto_tune(total_eps / 2, 1.0, &out_n_levels, &out_res, &out_stroke);
+    if (g_levels_min > out_n_levels) out_n_levels = g_levels_min;
+    if (out_n_levels > MAX_LEVELS - 1) out_n_levels = MAX_LEVELS - 1;
 
     if (val_svg) {
         FILE *fout = strcmp(val_svg, "-") == 0 ? stdout : fopen(val_svg, "w");
-        if (!fout) { fprintf(stderr, "Cannot open %s\n", val_svg); return 1; }
+        if (!fout) { diag("Cannot open %s\n", val_svg); return 1; }
         emit_svg(fout, descs, solved, n_tiles, 80.0, 4.0,
                  "#2c3e50", "#ecf0f1", show_curves, show_outlines,
                  rows, cols, shape_name, edge_eps_config, n_edge_vals,
                  total_eps, out_n_levels, val_minter);
         if (fout != stdout) {
             fclose(fout);
-            if (!g_quiet) fprintf(stderr, "  wrote %s\n", val_svg);
+            if (!g_quiet) diag("  wrote %s\n", val_svg);
         }
     }
     if (val_json) {
         FILE *fout = strcmp(val_json, "-") == 0 ? stdout : fopen(val_json, "w");
-        if (!fout) { fprintf(stderr, "Cannot open %s\n", val_json); return 1; }
+        if (!fout) { diag("Cannot open %s\n", val_json); return 1; }
         emit_json(fout, descs, solved, n_tiles, rows, cols, shape_name,
                   edge_eps_config, n_edge_vals, total_eps, out_n_levels, val_minter);
         if (fout != stdout) {
             fclose(fout);
-            if (!g_quiet) fprintf(stderr, "  wrote %s\n", val_json);
+            if (!g_quiet) diag("  wrote %s\n", val_json);
         }
     }
 
@@ -1253,15 +1273,15 @@ int main(int argc, char **argv)
         for (int i = 0; i < n_tiles; i++)
             if (descs[i].polarity) n_pol_true++;
 
-        fprintf(stderr, "\nStats:\n");
-        fprintf(stderr, "  Grid: %d tiles (%d polarity+, %d polarity-)\n",
+        diag("\nStats:\n");
+        diag("  Grid: %d tiles (%d polarity+, %d polarity-)\n",
                 n_tiles, n_pol_true, n_tiles - n_pol_true);
         char cat_str2[40], cat_str3[40];
         uint128_to_str(cat_str2, n_matchings);
         uint128_to_str(cat_str3, n_matchings * 2);
-        fprintf(stderr, "  Possible matchings: C(%d) = %s\n",
+        diag("  Possible matchings: C(%d) = %s\n",
                 total_eps / 2, cat_str2);
-        fprintf(stderr, "  Possible tile types: %s (%s matchings x 2 polarities)\n",
+        diag("  Possible tile types: %s (%s matchings x 2 polarities)\n",
                 cat_str3, cat_str2);
     }
 
@@ -1269,3 +1289,5 @@ int main(int argc, char **argv)
     free(solved);
     return 0;
 }
+
+#endif /* TRUCHET_NO_MAIN */

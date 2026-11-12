@@ -1,0 +1,106 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'Production' || 'Staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Determine base path
+        id: base
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "path=/" >> "$GITHUB_OUTPUT"
+            echo "subdir=" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=/staging/" >> "$GITHUB_OUTPUT"
+            echo "subdir=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        working-directory: frontend
+        env:
+          VITE_CHAIN_ID: ${{ vars.VITE_CHAIN_ID }}
+          VITE_RPC_URL: ${{ vars.VITE_RPC_URL }}
+          VITE_NFT_ADDRESS: ${{ vars.VITE_NFT_ADDRESS }}
+          VITE_GATE_ADDRESS: ${{ vars.VITE_GATE_ADDRESS }}
+          VITE_USDC_ADDRESS: ${{ vars.VITE_USDC_ADDRESS }}
+          VITE_BLOCK_EXPLORER: ${{ vars.VITE_BLOCK_EXPLORER }}
+          VITE_TILE_CDN: ${{ vars.VITE_TILE_CDN }}
+        run: pnpm build --base "${{ steps.base.outputs.path }}"
+
+      - name: Download existing site
+        uses: actions/download-artifact@v4
+        with:
+          name: github-pages
+          path: _existing
+        continue-on-error: true
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+
+          # Restore existing site if available
+          if [ -f _existing/artifact.tar ]; then
+            tar -xf _existing/artifact.tar -C _site 2>/dev/null || true
+          fi
+
+          SUBDIR="${{ steps.base.outputs.subdir }}"
+          if [ -n "$SUBDIR" ]; then
+            # Main branch: replace /staging/ subdir only
+            rm -rf "_site/$SUBDIR"
+            cp -r frontend/dist "_site/$SUBDIR"
+          else
+            # Tagged release: replace root files, preserve /staging/
+            mkdir -p _stash
+            [ -d _site/staging ] && mv _site/staging _stash/
+            rm -rf _site/*
+            cp -r frontend/dist/* _site/
+            [ -d _stash/staging ] && mv _stash/staging _site/
+            rm -rf _stash
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
