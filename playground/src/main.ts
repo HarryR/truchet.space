@@ -63,8 +63,6 @@ function updateHud() {
     const [ka, kb, kc] = world.familyAt(h.q, h.r)
     parts.push(`(${h.q}, ${h.r})  ${ka}·${kb}·${kc}`)
   }
-  const n = pool.pending
-  if (n > 0) parts.push(`solving ${n}`)
   hud.textContent = parts.join('  ·  ')
   hud.className = ''
 }

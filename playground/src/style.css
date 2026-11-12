@@ -56,7 +56,7 @@ button {
 #hud {
   position: fixed;
   right: calc(12px + env(safe-area-inset-right));
-  bottom: calc(var(--menu-h) + 10px + env(safe-area-inset-bottom));
+  bottom: calc(var(--menu-h) + 10px + max(0px, calc(env(safe-area-inset-bottom) - 14px)));
   z-index: 5;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -81,8 +81,12 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: calc(var(--menu-h) + env(safe-area-inset-bottom));
-  padding: 0 calc(12px + env(safe-area-inset-right)) env(safe-area-inset-bottom) calc(16px + env(safe-area-inset-left));
+  /* On home-indicator phones the full safe-area inset (~34px) under a 48px
+     bar reads as a gap. The buttons already sit ~7px above the bar's bottom
+     edge, so only add what's needed to clear the indicator. */
+  --menu-pad-b: max(0px, calc(env(safe-area-inset-bottom) - 14px));
+  height: calc(var(--menu-h) + var(--menu-pad-b));
+  padding: 0 calc(12px + env(safe-area-inset-right)) var(--menu-pad-b) calc(16px + env(safe-area-inset-left));
   background: rgba(10, 10, 10, 0.85);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);

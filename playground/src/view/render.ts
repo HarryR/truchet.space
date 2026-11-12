@@ -6,6 +6,7 @@
 
 import { hexToPixel } from '../hex'
 import { RASTER_H, RASTER_W, HEX_W, type TileCache } from '../tiles'
+import { solveKey } from '../solver/protocol'
 import { cellKey, type World } from '../world'
 import { layout, type Camera, type Cell } from './camera'
 import type { SolverPool } from '../solver/pool'
@@ -18,6 +19,7 @@ const COLORS = {
   bg: '#0a0a0a',
   loading: '#1a1f24',
   failed: '#3a1d1d',
+  solving: '#ffffff',
   frontier: 'rgba(70, 160, 110, 0.22)',
   frontierFill: 'rgba(70, 160, 110, 0.04)',
   hover: 'rgba(120, 220, 160, 0.22)',
@@ -57,6 +59,7 @@ export class Renderer {
     this.ctx = canvas.getContext('2d', { alpha: false })!
     world.subscribe(() => this.request())
     tiles.onChange(() => this.request())
+    pool.onStart = () => this.request()
   }
 
   resize() {
@@ -104,6 +107,9 @@ export class Renderer {
     const s = layout.size
     const loading = new Path2D(), failed = new Path2D()
     const frontier = new Path2D()
+    const solving = new Path2D()
+    // Dot radius: ~3 CSS px, but never more than a fifth of the hex.
+    const dotR = Math.min(3 / z, s * 0.2)
 
     for (let uq = q0; uq <= q1; uq++) {
       for (let ur = r0; ur <= r1; ur++) {
@@ -117,6 +123,10 @@ export class Renderer {
             ctx.drawImage(d.canvas, cx - RASTER_W / 2, cy - RASTER_H / 2, RASTER_W, RASTER_H)
           } else {
             addHex(tiles.state(params) === 'failed' ? failed : loading, cx, cy, s - 1)
+            if (this.pool.isSolving(solveKey(params))) {
+              solving.moveTo(cx + dotR, cy)
+              solving.arc(cx, cy, dotR, 0, Math.PI * 2)
+            }
           }
           continue
         }
@@ -131,6 +141,8 @@ export class Renderer {
     ctx.fill(loading)
     ctx.fillStyle = COLORS.failed
     ctx.fill(failed)
+    ctx.fillStyle = COLORS.solving
+    ctx.fill(solving)
     ctx.fillStyle = COLORS.frontierFill
     ctx.fill(frontier)
     ctx.lineWidth = Math.max(1, 1.5 / z)

@@ -34,6 +34,8 @@ export class SolverPool {
   private totalMs = 0
   private solved = 0
   error: string | null = null
+  /** Called when jobs start running (so the renderer can show them as in progress). */
+  onStart: (() => void) | null = null
   private onResult: ResultHandler
   private onError: (err: string) => void
 
@@ -67,6 +69,11 @@ export class SolverPool {
       this.queue.set(key, { key, params, priority, gen: this.gen })
     }
     this.pump()
+  }
+
+  /** True while the tile with this key is being solved by a worker. */
+  isSolving(key: string): boolean {
+    return this.running.has(key)
   }
 
   get pending(): number {
@@ -103,10 +110,12 @@ export class SolverPool {
   }
 
   private pump() {
+    let started = false
     for (const slot of this.slots) {
       if (!slot.ready || slot.job) continue
       const job = this.take()
-      if (!job) return
+      if (!job) break
+      started = true
       slot.job = job
       slot.jobId = this.nextId++
       this.running.add(job.key)
@@ -115,6 +124,7 @@ export class SolverPool {
         type: 'solve', id: slot.jobId, ka, kb, kc, polarity: polarity ? 1 : 0, idx: idx.toString(),
       } satisfies ToWorker)
     }
+    if (started) this.onStart?.()
   }
 
   /** Highest-priority live job; drops stale ones. */

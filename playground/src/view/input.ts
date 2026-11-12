@@ -89,6 +89,14 @@ export function attachInput(canvas: HTMLCanvasElement, camera: Camera, h: InputH
     if (e.pointerType === 'mouse' && !pointers.has(e.pointerId)) h.onHover(null)
   })
 
+  // Long-press on touch fires 'contextmenu' (iOS WebKit opens browser /
+  // extension menus on it) and shows the text loupe; touch-action: none
+  // doesn't stop either. Cancelling the touch events' defaults does, and
+  // pointer events above still fire normally.
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault())
+  canvas.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false })
+  canvas.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false })
+
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault()
     const [x, y] = local(e)
